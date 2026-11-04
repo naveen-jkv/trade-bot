@@ -1,0 +1,28 @@
+# Autonomous AI Trading Bot Dependencies
+# Compatible with Python 3.10 - 3.13
+
+# Core Data & Numerics
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
+
+# Machine Learning & AI
+scikit-learn>=1.3.0
+torch>=2.0.0
+joblib>=1.3.0
+
+# Financial Data & Market Analysis
+yfinance>=0.2.35
+
+# Web UI & Visualization
+streamlit>=1.30.0
+plotly>=5.18.0
+
+# API & LLM Integrations
+requests>=2.31.0
+httpx>=0.25.0
+python-dotenv>=1.0.0
+openai>=1.10.0
+
+# Testing & Quality
+pytest>=7.4.0
