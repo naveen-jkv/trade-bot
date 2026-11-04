@@ -21,10 +21,12 @@ logs/
 .env.*
 *.env
 
-# Virtual environments
+# Virtual environments & node
 venv/
 .venv/
 env/
+node_modules/
+frontend/node_modules/
 
 # IDE & OS files
 .vscode/

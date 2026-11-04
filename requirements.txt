@@ -14,7 +14,9 @@ joblib>=1.3.0
 # Financial Data & Market Analysis
 yfinance>=0.2.35
 
-# Web UI & Visualization
+# Web Terminal, API Server & Dashboard
+fastapi>=0.100.0
+uvicorn>=0.20.0
 streamlit>=1.30.0
 plotly>=5.18.0
 
