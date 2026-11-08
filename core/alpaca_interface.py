@@ -78,6 +78,15 @@ class AlpacaClientInterface(ABC):
         """Cancels an active or pending order."""
         pass
 
+    def cancel_all_orders(self) -> bool:
+        """Cancels all active open orders."""
+        open_orders = self.list_orders(status="open")
+        all_ok = True
+        for o in open_orders:
+            if not self.cancel_order(o.id):
+                all_ok = False
+        return all_ok
+
     @abstractmethod
     def list_positions(self) -> List[AlpacaPosition]:
         """Lists all open positions."""
@@ -96,6 +105,17 @@ class AlpacaClientInterface(ABC):
     ) -> Optional[AlpacaOrder]:
         """Liquidates an open position in part or full."""
         pass
+
+    def close_all_positions(self, cancel_orders: bool = True) -> List[AlpacaOrder]:
+        """Liquidates all open positions and optionally cancels open orders."""
+        if cancel_orders:
+            self.cancel_all_orders()
+        closed_orders = []
+        for pos in self.list_positions():
+            order = self.close_position(pos.symbol)
+            if order:
+                closed_orders.append(order)
+        return closed_orders
 
     @abstractmethod
     def get_clock(self) -> AlpacaClock:

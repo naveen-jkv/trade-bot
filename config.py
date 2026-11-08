@@ -8,6 +8,12 @@ from pathlib import Path
 from typing import Dict, List
 import os
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Base Directories
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -134,17 +140,30 @@ class LLMSettings:
 @dataclass
 class AlpacaSettings:
     """
-    Alpaca architecture configuration for educational development.
-    SAFETY RULE: Broker connectivity is strictly disabled by default.
+    Alpaca architecture configuration for Paper and Live Real-Money trading.
     Credentials are read ONLY from environment variables and never hardcoded in source.
     """
     api_key: str = field(default_factory=lambda: os.getenv("ALPACA_API_KEY", ""))
     secret_key: str = field(default_factory=lambda: os.getenv("ALPACA_SECRET_KEY", ""))
+    trading_mode: str = field(default_factory=lambda: os.getenv("TRADING_MODE", "PAPER").upper())  # 'LIVE', 'PAPER', or 'MOCK'
+    confirm_real_money: bool = field(default_factory=lambda: os.getenv("CONFIRM_REAL_MONEY_TRADING", "false").lower() in ("true", "1", "yes"))
     base_url: str = "https://paper-api.alpaca.markets"
-    live_connectivity_enabled: bool = False   # Hardcoded immutable safety guard
+    live_connectivity_enabled: bool = False
     mock_initial_cash: float = 100000.0       # Standard paper trading starter balance
     is_paper: bool = True
     account_id: str = "MOCK-ALPACA-EDU-001"
+    max_order_usd: float = field(default_factory=lambda: float(os.getenv("MAX_ORDER_USD", "1000.0")))
+    kill_switch_active: bool = field(default_factory=lambda: os.getenv("TRADING_KILL_SWITCH", "false").lower() in ("true", "1", "yes"))
+
+    def __post_init__(self):
+        if self.trading_mode == "LIVE":
+            self.is_paper = False
+            self.base_url = "https://api.alpaca.markets"
+        elif self.trading_mode == "PAPER":
+            self.is_paper = True
+            self.base_url = "https://paper-api.alpaca.markets"
+        if bool(self.api_key and self.secret_key and self.trading_mode in ("LIVE", "PAPER")):
+            self.live_connectivity_enabled = True
 
 
 @dataclass

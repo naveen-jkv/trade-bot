@@ -7,7 +7,9 @@ Market Data -> Market Analysis -> AI Research -> Strategy Evaluation
 
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Tuple
+import threading
+import time
+from typing import Dict, List, Optional, Any, Tuple, Callable
 import pandas as pd
 
 from config import DEFAULT_CONFIG, SystemConfig, SUPPORTED_PAIRS
@@ -21,7 +23,10 @@ from agents.research_agent import AIResearchAgent, TradingHypothesis
 from agents.strategy_agent import StrategyEvaluationAgent, TradeProposal
 from agents.evaluation_agent import PerformanceEvaluationAgent, EvaluationReport
 from agents.memory_agent import AIMemoryAgent
+from core.alpaca_interface import AlpacaClientInterface
 from core.alpaca_mock_client import MockAlpacaClient
+from core.alpaca_factory import create_alpaca_client
+from core.asset_classes import is_forex_symbol, is_alpaca_symbol
 
 
 @dataclass
@@ -84,10 +89,21 @@ class AutonomousTradingAgent:
         self.eval_agent = PerformanceEvaluationAgent(db=self.db)
         self.memory_agent = AIMemoryAgent(db=self.db)
 
-        # Modular Alpaca Architecture (Simulated / Educational)
-        self.alpaca_client = MockAlpacaClient(config=self.config, db=self.db)
+        # Modular Alpaca Architecture (Simulated / Educational / Live Real-Money)
+        self.alpaca_client = create_alpaca_client(config=self.config, db=self.db)
 
         self.last_cycle_summary: Optional[CycleExecutionSummary] = None
+        self._monitor_thread: Optional[threading.Thread] = None
+        self._stop_monitor_event = threading.Event()
+        self._is_monitoring = False
+        self._last_monitoring_status: Dict[str, Any] = {
+            "is_active": False,
+            "interval_seconds": 60,
+            "monitored_pairs": [],
+            "last_tick_time": None,
+            "total_cycles_executed": 0,
+        }
+        self.cycle_listeners: List[Callable[[CycleExecutionSummary], None]] = []
 
     def run_cycle(
         self,
@@ -169,21 +185,40 @@ class AutonomousTradingAgent:
                 risk_score=0.0,
             )
 
-        # Step 7: Paper Trading Simulator executes approved trade
+        # Step 7: Execution Engine executes approved trade (Forex or Alpaca)
         executed_pos_dict = None
-        if risk_res.is_approved and risk_res.approved_lot_size > 0:
-            new_pos = self.paper_trader.open_trade(
-                symbol=symbol,
-                action=risk_res.action,
-                lots=risk_res.approved_lot_size,
-                entry_price=risk_res.entry_price,
-                stop_loss=risk_res.stop_loss,
-                take_profit=risk_res.take_profit,
-                hypothesis_id=hypothesis.id,
-                timestamp=ts,
-            )
-            if new_pos:
-                executed_pos_dict = new_pos.to_dict()
+        if risk_res.is_approved:
+            if is_alpaca_symbol(symbol):
+                # Calculate share / crypto quantity based on approved risk amount
+                price = risk_res.entry_price or report.current_price
+                risk_dollars = max(50.0, risk_res.risk_amount_dollars or 100.0)
+                max_order_usd = getattr(self.config.alpaca, "max_order_usd", 1000.0)
+                notional = min(risk_dollars, max_order_usd)
+                if price > 0:
+                    raw_qty = notional / price
+                    qty = round(raw_qty, 4) if "/" in symbol else max(1.0, round(raw_qty, 0))
+                    alpaca_order = self.alpaca_client.submit_order(
+                        symbol=symbol,
+                        qty=qty,
+                        side=risk_res.action.lower(),
+                        order_type="market",
+                        time_in_force="day",
+                    )
+                    if alpaca_order:
+                        executed_pos_dict = alpaca_order.to_dict()
+            elif risk_res.approved_lot_size > 0:
+                new_pos = self.paper_trader.open_trade(
+                    symbol=symbol,
+                    action=risk_res.action,
+                    lots=risk_res.approved_lot_size,
+                    entry_price=risk_res.entry_price,
+                    stop_loss=risk_res.stop_loss,
+                    take_profit=risk_res.take_profit,
+                    hypothesis_id=hypothesis.id,
+                    timestamp=ts,
+                )
+                if new_pos:
+                    executed_pos_dict = new_pos.to_dict()
 
         # Step 8: Get updated portfolio snapshot
         portfolio_summary = self.paper_trader.get_portfolio_summary()
@@ -205,3 +240,77 @@ class AutonomousTradingAgent:
 
         self.last_cycle_summary = summary
         return summary
+
+    @property
+    def is_monitoring(self) -> bool:
+        return self._is_monitoring
+
+    def get_monitoring_status(self) -> Dict[str, Any]:
+        return {
+            **self._last_monitoring_status,
+            "is_active": self._is_monitoring,
+        }
+
+    def register_cycle_listener(self, callback: Callable[[CycleExecutionSummary], None]) -> None:
+        if callback not in self.cycle_listeners:
+            self.cycle_listeners.append(callback)
+
+    def unregister_cycle_listener(self, callback: Callable[[CycleExecutionSummary], None]) -> None:
+        if callback in self.cycle_listeners:
+            self.cycle_listeners.remove(callback)
+
+    def start_continuous_monitoring(
+        self,
+        pairs: Optional[List[str]] = None,
+        interval_seconds: int = 60,
+        force_synthetic: bool = False,
+    ) -> bool:
+        """Starts continuous autonomous market monitoring loop in a background thread."""
+        if self._is_monitoring:
+            return False
+
+        target_pairs = pairs or list(SUPPORTED_PAIRS.keys())
+        self._stop_monitor_event.clear()
+        self._is_monitoring = True
+        self._last_monitoring_status["is_active"] = True
+        self._last_monitoring_status["interval_seconds"] = interval_seconds
+        self._last_monitoring_status["monitored_pairs"] = target_pairs
+
+        def _monitor_loop():
+            while not self._stop_monitor_event.is_set():
+                for pair in target_pairs:
+                    if self._stop_monitor_event.is_set():
+                        break
+                    try:
+                        summary = self.run_cycle(symbol=pair, timeframe="1h", force_synthetic=force_synthetic)
+                        self._last_monitoring_status["last_tick_time"] = datetime.now(timezone.utc).isoformat()
+                        self._last_monitoring_status["total_cycles_executed"] += 1
+                        for listener in list(self.cycle_listeners):
+                            try:
+                                listener(summary)
+                            except Exception as ex_list:
+                                print(f"[Listener Error]: {ex_list}")
+                    except Exception as ex:
+                        print(f"[Continuous Monitor Exception on {pair}]: {ex}")
+                self._stop_monitor_event.wait(timeout=interval_seconds)
+            self._is_monitoring = False
+        self._last_monitoring_status["is_active"] = False
+
+        self._monitor_thread = threading.Thread(
+            target=_monitor_loop,
+            daemon=True,
+            name="TradeBot-ContinuousMonitor",
+        )
+        self._monitor_thread.start()
+        return True
+
+    def stop_continuous_monitoring(self) -> bool:
+        """Stops the continuous autonomous monitoring loop gracefully."""
+        if not self._is_monitoring:
+            return False
+        self._stop_monitor_event.set()
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            self._monitor_thread.join(timeout=3.0)
+        self._is_monitoring = False
+        self._last_monitoring_status["is_active"] = False
+        return True

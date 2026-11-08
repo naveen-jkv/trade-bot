@@ -19,6 +19,7 @@ logs/
 # Environment variables & secrets
 .env
 .env.*
+!.env.example
 *.env
 
 # Virtual environments & node

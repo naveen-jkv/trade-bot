@@ -185,3 +185,4 @@ export default function TradingViewChart({ bars = [], activePositions = [], symb
     </div>
   );
 }
+

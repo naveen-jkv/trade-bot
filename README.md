@@ -1,8 +1,22 @@
-# 🤖 Autonomous AI Trading Bot (Multi-Agent Forex & Alpaca Simulation)
+# 🤖 Autonomous AI Trading Bot (Multi-Agent Forex & Alpaca Live Trading)
 
-An institutional-grade, autonomous algorithmic trading system inspired by modern AI trading-agent architectures. The system deploys specialized autonomous agents to analyze Forex and equity markets, develop trading hypotheses, evaluate opportunities, execute simulated paper trades, evaluate its own decisions retrospectively, and store permanent lessons in persistent SQLite memory.
+An institutional-grade, autonomous algorithmic trading system inspired by modern AI trading-agent architectures. The system deploys specialized autonomous agents to analyze Forex, US Equity, and Cryptocurrency markets, develop trading hypotheses, evaluate opportunities, execute paper or live real-money trades, evaluate its own decisions retrospectively, and store permanent lessons in persistent SQLite memory.
 
-> **IMPORTANT**: This bot operates strictly in **Paper-Trading Mode**. It simulates realistic execution with virtual capital, spreads, slippage, and margins. It does **not** connect to real-money accounts or execute live broker orders. All broker connectivity is permanently disabled.
+---
+
+## ⚡ Execution Environments & Real-Money Trading
+
+The bot supports 3 execution environments via a unified broker abstraction layer (`AlpacaClientInterface`):
+
+| Environment | Mode | Broker Endpoint | Capital at Risk | Safety Requirement |
+| :--- | :--- | :--- | :--- | :--- |
+| **Offline Sandbox** | `MOCK` | Local Matching Engine | Virtual ($0 risk) | Default offline sandbox |
+| **Alpaca Paper** | `PAPER` | `https://paper-api.alpaca.markets` | Virtual ($0 risk) | `ALPACA_API_KEY` & `ALPACA_SECRET_KEY` |
+| **Alpaca Live Real-Money** | `LIVE` | `https://api.alpaca.markets` | **REAL MONEY** | `CONFIRM_REAL_MONEY_TRADING=TRUE` |
+
+> [!CAUTION]
+> **REAL-MONEY TRADING SAFETY SAFEGUARD**:
+> When `TRADING_MODE=LIVE`, the bot connects directly to **Alpaca Securities Live REST API**. To prevent accidental capital exposure, real-money execution is protected by an **immutable safety tripwire**: orders are strictly blocked unless `CONFIRM_REAL_MONEY_TRADING=TRUE` is explicitly configured. All orders are subject to the deterministic Risk Firewall (`MAX_ORDER_USD` cap, daily drawdown halt, and instant Emergency Flatten / Kill Switch).
 
 ---
 
@@ -10,18 +24,20 @@ An institutional-grade, autonomous algorithmic trading system inspired by modern
 
 ```mermaid
 flowchart TD
-    MD[Market Data Ingestion\nYahoo Finance / Synthetic GARCH] --> MAA[Market Analysis Agent\nTechnicals, Regime, S/R, Price Action]
+    MD[Market Data Ingestion\nYahoo Finance / Synthetic GARCH / Alpaca] --> MAA[Market Analysis Agent\nTechnicals, Regime, S/R, Price Action]
     MAA --> ARA[AI Research Agent\nLLM / Heuristic Reasoning Engine]
     MEM[(Persistent Memory\nSQLite DB)] <--> ARA
     ARA --> SEA[Strategy Evaluation Agent\nSignal Arbitration & Ensemble]
     PRED[ML Predictor\nRandom Forest + PyTorch LSTM] --> SEA
     SEA --> RVE[Risk Validation Engine\nDeterministic Immutable Firewall]
-    RVE -->|Approved| PTS[Paper Trading Simulator\nVirtual Portfolio & Execution]
+    RVE -->|Approved Forex| PTS[Paper Trading Simulator\nForex Spreads & Slippage]
+    RVE -->|Approved Equity/Crypto| BAC[Alpaca Client Factory\nMock / Paper / Live Real-Money]
     RVE -->|Blocked| LOG[Audit Log & Rejection]
     PTS --> PEA[Performance Evaluation Agent\nRetrospective Post-Mortem]
+    BAC --> PEA
     PEA -->|Persist Lessons| MEM
     PEA -->|OOS Testing| SEA
-    PTS --> TERM[Modern Web Terminal\nReact + TradingView + FastAPI]
+    PTS & BAC --> TERM[Modern Web Terminal\nReact + TradingView + FastAPI]
 ```
 
 ### Specialized Agents & Modules
@@ -47,26 +63,27 @@ flowchart TD
    - Enforces maximum risk per trade (default 1.5%, hard cap 2.5% of equity).
    - Maximum daily drawdown cutoff (3.5% daily stop) and total drawdown ceiling (8.0%).
    - Dynamic lot sizing based on stop-loss pip distance, pip value, and current equity.
+   - Real-money dollar cap enforcement (`MAX_ORDER_USD`).
+   - One-click Emergency Kill Switch halting all order processing.
 
-5. **Paper Trading Simulator (`core/paper_trader.py`)**
-   - Virtual account balance ($10,000 default).
-   - Models realistic Forex spreads and adverse execution slippage.
-   - Real-time candle evaluation: automatically executes Stop-Loss and Take-Profit fills on high/low price action.
+5. **Live & Paper Broker Execution (`core/alpaca_live_client.py` & `core/alpaca_factory.py`)**
+   - Direct integration with Alpaca REST v2 API (Accounts, Orders, Positions, Clock, Assets).
+   - Dynamic routing to Paper or Live Real-Money matching engines.
+   - Emergency panic liquidation (`close_all_positions(cancel_orders=True)`).
+   - SQLite persistence of executed orders and positions.
 
-6. **Performance Evaluation Agent (`agents/evaluation_agent.py`)**
+6. **Paper Trading Simulator (`core/paper_trader.py`)**
+   - Realistic Forex simulation with virtual balance, spreads, slippage, and margins.
+   - Real-time candle evaluation: automatically executes Stop-Loss and Take-Profit fills.
+
+7. **Performance Evaluation Agent (`agents/evaluation_agent.py`)**
    - Post-trade retrospective evaluation: compares prediction direction against realized price movement.
    - Categorizes mistakes (e.g. volatility whipsaw, false breakout in compressed regime, counter-trend entry).
    - Formulates concrete lessons and stores them into persistent SQLite memory.
 
-7. **Persistent Memory Agent (`agents/memory_agent.py` & `database/memory.py`)**
+8. **Persistent Memory Agent (`agents/memory_agent.py` & `database/memory.py`)**
    - High-concurrency SQLite database with Write-Ahead Logging (WAL).
-   - Tables: `hypotheses`, `predictions`, `trades`, `lessons_learned`, `strategy_evaluations`, and `agent_logs`.
-
-8. **Modular Alpaca-Compatible Architecture (`core/alpaca_mock_client.py` & `core/alpaca_interface.py`)**
-   - **Educational Architecture**: Conforms strictly to Alpaca REST v2 API specification (Accounts, Orders, Positions, Clock, Assets).
-   - **Hardcoded Broker Connectivity Disabling**: All live network connectivity to external brokers is strictly disabled (`broker_connectivity_enabled = False`).
-   - **Offline Mock Execution**: Simulated matching engine fills Market, Limit, and Stop orders against local market data with realistic slippage.
-   - **Asset Class Separation**: Explicit boundary separating Forex currency pairs from Alpaca assets (US Equities & Crypto in shares/units).
+   - Tables: `hypotheses`, `predictions`, `trades`, `lessons_learned`, `alpaca_mock_orders`, and `agent_logs`.
 
 ---
 
@@ -110,15 +127,17 @@ Open **[http://localhost:8501](http://localhost:8501)** in your browser.
 
 ## 🧪 Testing Coverage
 
-The `tests/` directory includes 25 automated unit and integration tests covering:
+The `tests/` directory includes 39 automated unit and integration tests covering:
+- `test_live_alpaca_client.py`: Live and paper endpoint routing, real-money confirmation safety locks, kill switch trips, dollar cap enforcement, REST v2 schema parsing, panic emergency flatten, and client factory.
 - `test_indicators.py`: RSI Wilder smoothing, MACD convergence, Bollinger Band envelopes, ATR.
 - `test_risk_manager.py`: Lot sizing, RR rejection, drawdown ceiling trips, duplicate order prevention.
 - `test_paper_trader.py`: Margin calculations, spread costs, take-profit spikes, stop-loss cuts.
 - `test_prediction.py`: Feature stationary pipeline, Random Forest training, PyTorch LSTM inference.
 - `test_agent_workflow.py`: Complete end-to-end multi-agent autonomous cycle.
-- `test_alpaca_integration.py`: Modular interface compliance, connectivity disabled safeguards, mock account, simulated execution, limit orders, asset class separation, market data abstraction, secret hygiene, and SQLite persistence.
+- `test_alpaca_integration.py`: Modular interface compliance, mock account, simulated execution, limit orders, asset class separation, market data abstraction, secret hygiene, and SQLite persistence.
+- `test_audit_suite.py`: Continuous market monitoring lifecycle, retrospective evaluation, and persistent SQLite memory.
 
-Run the full suite anytime with:
+Run the test suite anytime with:
 ```bash
 python -m pytest -v tests/
 ```

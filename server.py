@@ -61,6 +61,12 @@ app.add_middleware(
 
 
 # --- Request Models ---
+class MonitorStartRequest(BaseModel):
+    pairs: Optional[List[str]] = None
+    interval_seconds: int = 60
+    force_synthetic: bool = False
+
+
 class CycleRequest(BaseModel):
     symbol: str = "EUR/USD"
     timeframe: str = "1h"
@@ -83,6 +89,18 @@ class AlpacaOrderRequest(BaseModel):
 
 class AlpacaCloseRequest(BaseModel):
     symbol: str
+
+
+class KillSwitchRequest(BaseModel):
+    active: bool
+
+
+class SystemModeRequest(BaseModel):
+    trading_mode: str                  # 'LIVE', 'PAPER', or 'MOCK'
+    confirm_real_money: Optional[bool] = False
+    api_key: Optional[str] = None
+    secret_key: Optional[str] = None
+    max_order_usd: Optional[float] = None
 
 
 # --- Helper Broadcast ---
@@ -230,6 +248,34 @@ async def execute_cycle(req: CycleRequest):
     return summary_dict
 
 
+@app.get("/api/monitor/status")
+async def get_continuous_monitoring_status():
+    """Returns status of the continuous autonomous market monitoring loop."""
+    return agent.get_monitoring_status()
+
+
+@app.post("/api/monitor/start")
+async def start_continuous_monitoring(req: MonitorStartRequest):
+    """Starts the autonomous market monitoring background loop across specified pairs."""
+    success = agent.start_continuous_monitoring(
+        pairs=req.pairs,
+        interval_seconds=req.interval_seconds,
+        force_synthetic=req.force_synthetic,
+    )
+    if not success:
+        return {"status": "ALREADY_RUNNING", "message": "Continuous monitoring loop is already running.", "config": agent.get_monitoring_status()}
+    await broadcast_ws("MONITOR_STATUS", agent.get_monitoring_status())
+    return {"status": "STARTED", "message": "Continuous market monitoring started.", "config": agent.get_monitoring_status()}
+
+
+@app.post("/api/monitor/stop")
+async def stop_continuous_monitoring():
+    """Gracefully stops the continuous autonomous monitoring loop."""
+    stopped = agent.stop_continuous_monitoring()
+    await broadcast_ws("MONITOR_STATUS", agent.get_monitoring_status())
+    return {"status": "STOPPED" if stopped else "NOT_RUNNING", "config": agent.get_monitoring_status()}
+
+
 @app.get("/api/portfolio")
 async def get_portfolio_overview():
     """Returns unified portfolio balances, open positions, and margin status for Forex and Alpaca."""
@@ -284,7 +330,33 @@ async def close_forex_position(req: ForexCloseRequest):
 
 @app.post("/api/orders/alpaca")
 async def submit_alpaca_order(req: AlpacaOrderRequest):
-    """Submits a simulated order to the Alpaca mock broker."""
+    """Submits an order to Alpaca (Paper or Live Real-Money) with Risk Firewall validation."""
+    # Pre-flight Risk Validation
+    acct = agent.alpaca_client.get_account()
+    latest_px = req.limit_price or req.stop_price
+    if not latest_px or latest_px <= 0:
+        try:
+            curr_px, _, _ = market_router.get_latest_price(req.symbol)
+            latest_px = curr_px
+        except Exception:
+            latest_px = 100.0
+
+    max_order_limit = getattr(agent.config.alpaca, "max_order_usd", 1000.0)
+    is_ok, reasons, notional = agent.risk_manager.validate_alpaca_order(
+        symbol=req.symbol,
+        side=req.side,
+        qty=req.qty,
+        price=latest_px,
+        buying_power=acct.buying_power,
+        max_order_usd=max_order_limit,
+    )
+
+    if not is_ok:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Risk Firewall Blocked Order: {'; '.join(reasons)}"
+        )
+
     order = agent.alpaca_client.submit_order(
         symbol=req.symbol,
         qty=req.qty,
@@ -296,6 +368,120 @@ async def submit_alpaca_order(req: AlpacaOrderRequest):
     )
     await broadcast_ws("ALPACA_ORDER", order.to_dict())
     return order.to_dict()
+
+
+@app.get("/api/system/mode")
+async def get_system_mode():
+    """Returns current trading environment, broker connectivity, and safety settings."""
+    alpaca_cfg = agent.config.alpaca
+    mode = getattr(alpaca_cfg, "trading_mode", "PAPER")
+    is_paper = getattr(agent.alpaca_client, "is_paper", True)
+    is_live = not is_paper
+    confirm_real_money = getattr(agent.alpaca_client, "confirm_real_money", False)
+    kill_switch = getattr(agent.risk_manager, "kill_switch_active", False)
+    max_order_usd = getattr(agent.alpaca_client, "max_order_usd", 1000.0)
+
+    badge = (
+        "🔴 LIVE: REAL MONEY ACTIVE"
+        if (is_live and confirm_real_money)
+        else ("🟡 LIVE (LOCKED: PENDING CONFIRMATION)" if is_live else ("🟢 ALPACA PAPER" if getattr(agent.alpaca_client, "is_live_connected", False) else "⚪ SIMULATED MOCK"))
+    )
+
+    return {
+        "trading_mode": mode,
+        "is_paper": is_paper,
+        "is_live": is_live,
+        "confirm_real_money": confirm_real_money,
+        "kill_switch_active": kill_switch,
+        "max_order_usd": max_order_usd,
+        "badge": badge,
+        "base_url": getattr(agent.alpaca_client, "base_url", "https://paper-api.alpaca.markets"),
+        "broker_connected": getattr(agent.alpaca_client, "is_live_connected", False),
+    }
+
+
+@app.post("/api/system/mode")
+async def configure_system_mode(req: SystemModeRequest):
+    """Dynamically updates trading mode between LIVE (Real Money), PAPER, and MOCK."""
+    mode = req.trading_mode.strip().upper()
+    if mode not in ("LIVE", "PAPER", "MOCK"):
+        raise HTTPException(status_code=400, detail="Invalid mode. Choose LIVE, PAPER, or MOCK.")
+
+    agent.config.alpaca.trading_mode = mode
+    if req.confirm_real_money is not None:
+        agent.config.alpaca.confirm_real_money = bool(req.confirm_real_money)
+    if req.api_key:
+        agent.config.alpaca.api_key = req.api_key
+    if req.secret_key:
+        agent.config.alpaca.secret_key = req.secret_key
+    if req.max_order_usd:
+        agent.config.alpaca.max_order_usd = float(req.max_order_usd)
+
+    # Re-initialize client
+    from core.alpaca_factory import create_alpaca_client
+    agent.alpaca_client = create_alpaca_client(config=agent.config, db=agent.db)
+
+    await broadcast_ws("SYSTEM_MODE_CHANGED", {"trading_mode": mode})
+    return {
+        "status": "UPDATED",
+        "trading_mode": mode,
+        "confirm_real_money": agent.config.alpaca.confirm_real_money,
+        "is_paper": getattr(agent.alpaca_client, "is_paper", True),
+        "is_live_broker": getattr(agent.alpaca_client, "broker_connectivity_enabled", False),
+    }
+
+
+@app.post("/api/kill-switch")
+async def set_kill_switch(req: KillSwitchRequest):
+    """Engages or disengages the emergency trading kill switch."""
+    if req.active:
+        agent.risk_manager.activate_kill_switch()
+        if hasattr(agent.alpaca_client, "set_kill_switch"):
+            agent.alpaca_client.set_kill_switch(True)
+    else:
+        agent.risk_manager.deactivate_kill_switch()
+        if hasattr(agent.alpaca_client, "set_kill_switch"):
+            agent.alpaca_client.set_kill_switch(False)
+    await broadcast_ws("KILL_SWITCH_STATUS", {"active": req.active})
+    return {"kill_switch_active": req.active, "message": f"Kill switch {'activated' if req.active else 'deactivated'}."}
+
+
+@app.post("/api/emergency/flatten")
+async def emergency_flatten_all():
+    """
+    CRITICAL PANIC ACTION:
+    Liquidates all open Forex and Alpaca positions and cancels all pending orders.
+    """
+    # 1. Activate kill switch immediately to block incoming orders
+    agent.risk_manager.activate_kill_switch()
+    if hasattr(agent.alpaca_client, "set_kill_switch"):
+        agent.alpaca_client.set_kill_switch(True)
+
+    # 2. Close all Forex open positions
+    forex_closed = []
+    for ticket_id, pos in list(agent.paper_trader.open_positions.items()):
+        cl = agent.paper_trader.close_trade(ticket_id, pos.current_price, exit_reason="EMERGENCY_FLATTEN")
+        if cl:
+            forex_closed.append(cl.to_dict())
+
+    # 3. Liquidate all Alpaca positions & cancel orders
+    alpaca_liquidated = []
+    try:
+        alpaca_liquidated = [o.to_dict() for o in agent.alpaca_client.close_all_positions(cancel_orders=True)]
+    except Exception as ex:
+        print(f"Error during Alpaca emergency liquidation: {ex}")
+
+    await broadcast_ws("EMERGENCY_FLATTEN", {
+        "forex_positions_closed": len(forex_closed),
+        "alpaca_positions_liquidated": len(alpaca_liquidated),
+    })
+
+    return {
+        "status": "FLATTENED",
+        "message": "All open positions liquidated and orders canceled. Emergency Kill Switch engaged.",
+        "forex_closed": forex_closed,
+        "alpaca_liquidated": alpaca_liquidated,
+    }
 
 
 @app.post("/api/orders/alpaca/close")
@@ -392,3 +578,4 @@ if dist_path.exists():
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="127.0.0.1", port=8000, reload=True)
+

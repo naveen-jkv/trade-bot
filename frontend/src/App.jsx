@@ -30,6 +30,27 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [activeBottomTab, setActiveBottomTab] = useState('positions');
 
+  // System & Trading Mode State (LIVE vs PAPER vs MOCK)
+  const [systemMode, setSystemMode] = useState({
+    trading_mode: 'PAPER',
+    is_paper: true,
+    is_live: false,
+    confirm_real_money: false,
+    kill_switch_active: false,
+    max_order_usd: 1000.0,
+    badge: '🟢 ALPACA PAPER',
+    base_url: 'https://paper-api.alpaca.markets',
+    broker_connected: false,
+  });
+  const [showSettingsModal, setShowSettingsModal] = useState(false);
+  const [modeForm, setModeForm] = useState({
+    trading_mode: 'PAPER',
+    confirm_real_money: false,
+    api_key: '',
+    secret_key: '',
+    max_order_usd: 1000.0,
+  });
+
   // Order Desk state
   const [orderDeskType, setOrderDeskType] = useState('alpaca'); // 'alpaca' or 'forex'
   const [alpacaSymbol, setAlpacaSymbol] = useState('AAPL');
@@ -91,16 +112,101 @@ export default function App() {
     }
   };
 
+  // Fetch System Mode & Broker Configuration
+  const fetchSystemMode = async () => {
+    try {
+      const res = await fetch('/api/system/mode');
+      if (res.ok) {
+        const data = await res.json();
+        setSystemMode(data);
+        setModeForm((prev) => ({
+          ...prev,
+          trading_mode: data.trading_mode,
+          confirm_real_money: data.confirm_real_money,
+          max_order_usd: data.max_order_usd,
+        }));
+      }
+    } catch (err) {
+      console.error('Failed to fetch system mode:', err);
+    }
+  };
+
+  // Toggle Emergency Kill Switch
+  const handleToggleKillSwitch = async () => {
+    const nextState = !systemMode.kill_switch_active;
+    try {
+      const res = await fetch('/api/kill-switch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ active: nextState }),
+      });
+      if (res.ok) {
+        await fetchSystemMode();
+      }
+    } catch (err) {
+      console.error('Failed to toggle kill switch:', err);
+    }
+  };
+
+  // Emergency Panic Action: Flatten All Positions
+  const handleEmergencyFlatten = async () => {
+    const conf = window.confirm(
+      '🚨 EMERGENCY PANIC ACTION:\n\nThis will immediately cancel all open orders and liquidate all open Forex and Alpaca positions at market.\n\nAre you sure you want to execute emergency flatten?'
+    );
+    if (!conf) return;
+
+    try {
+      const res = await fetch('/api/emergency/flatten', { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        alert(`Emergency liquidation complete: ${data.forex_closed?.length || 0} Forex and ${data.alpaca_liquidated?.length || 0} Alpaca positions liquidated.`);
+        await Promise.all([fetchPortfolio(), fetchHistory(), fetchSystemMode()]);
+      } else {
+        alert(`Flatten error: ${data.detail || 'Failed'}`);
+      }
+    } catch (err) {
+      alert(`Network error during emergency flatten: ${err.message}`);
+    }
+  };
+
+  // Save Broker Mode & Credentials
+  const handleSaveMode = async (e) => {
+    e.preventDefault();
+    if (modeForm.trading_mode === 'LIVE' && !modeForm.confirm_real_money) {
+      alert('⚠️ Live Real-Money trading requires checking the confirmation checkbox to unlock.');
+      return;
+    }
+    try {
+      const res = await fetch('/api/system/mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(modeForm),
+      });
+      if (res.ok) {
+        setShowSettingsModal(false);
+        await Promise.all([fetchSystemMode(), fetchPortfolio()]);
+        alert('Trading configuration saved successfully.');
+      } else {
+        const data = await res.json();
+        alert(`Failed to update mode: ${data.detail || 'Error'}`);
+      }
+    } catch (err) {
+      alert(`Error updating mode: ${err.message}`);
+    }
+  };
+
   // Initial Load & Polling
   useEffect(() => {
     fetchMarket(symbol, timeframe);
     fetchPortfolio();
     fetchHistory();
     fetchMemory();
+    fetchSystemMode();
 
     const interval = setInterval(() => {
       fetchMarket(symbol, timeframe);
       fetchPortfolio();
+      fetchSystemMode();
     }, 10000);
 
     return () => clearInterval(interval);
@@ -143,10 +249,26 @@ export default function App() {
     }
   };
 
-  // Submit Alpaca Simulated Order
+  // Submit Alpaca Order (Live Real-Money or Paper)
   const handleSubmitAlpacaOrder = async () => {
+    if (systemMode.is_live && systemMode.confirm_real_money) {
+      const conf = window.confirm(
+        `⚠️ REAL MONEY CONFIRMATION:\n\nYou are about to submit a LIVE order on your Alpaca brokerage account:\n` +
+        `Action: ${orderSide.toUpperCase()}\n` +
+        `Symbol: ${alpacaSymbol}\n` +
+        `Quantity: ${orderQty}\n` +
+        `Order Type: ${orderType.toUpperCase()}\n\n` +
+        `Real capital will be committed. Proceed?`
+      );
+      if (!conf) return;
+    }
+
     try {
-      setOrderStatusMsg('Submitting simulated order...');
+      setOrderStatusMsg(
+        systemMode.is_live && systemMode.confirm_real_money
+          ? 'Submitting LIVE REAL-MONEY order to Alpaca...'
+          : 'Submitting order...'
+      );
       const payload = {
         symbol: alpacaSymbol,
         qty: parseFloat(orderQty),
@@ -309,18 +431,80 @@ export default function App() {
         </div>
 
         {/* Right Side Status & Trigger */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <div style={{ display: 'flex', gap: '6px', fontSize: '11px', fontWeight: 600 }}>
-            <span style={{ background: 'rgba(34,197,94,0.15)', color: '#4ade80', padding: '3px 8px', borderRadius: '4px', border: '1px solid rgba(34,197,94,0.3)' }}>
-              🟢 SWARM ACTIVE
-            </span>
+            {systemMode.is_live && systemMode.confirm_real_money ? (
+              <span style={{ background: 'rgba(239,68,68,0.25)', color: '#f87171', border: '1px solid #ef4444', padding: '3px 8px', borderRadius: '4px', fontWeight: 700 }}>
+                🔴 LIVE: REAL MONEY
+              </span>
+            ) : systemMode.is_live ? (
+              <span style={{ background: 'rgba(234,179,8,0.25)', color: '#facc15', border: '1px solid #eab308', padding: '3px 8px', borderRadius: '4px' }}>
+                🟡 LIVE (LOCKED)
+              </span>
+            ) : systemMode.broker_connected ? (
+              <span style={{ background: 'rgba(34,197,94,0.15)', color: '#4ade80', border: '1px solid rgba(34,197,94,0.3)', padding: '3px 8px', borderRadius: '4px' }}>
+                🟢 ALPACA PAPER
+              </span>
+            ) : (
+              <span style={{ background: 'rgba(148,163,184,0.15)', color: '#94a3b8', border: '1px solid rgba(148,163,184,0.3)', padding: '3px 8px', borderRadius: '4px' }}>
+                ⚪ MOCK SIMULATOR
+              </span>
+            )}
             <span style={{ background: 'rgba(59,130,246,0.15)', color: '#60a5fa', padding: '3px 8px', borderRadius: '4px', border: '1px solid rgba(59,130,246,0.3)' }}>
-              🛡️ FIREWALL LOCKED
-            </span>
-            <span style={{ background: 'rgba(234,179,8,0.15)', color: '#facc15', padding: '3px 8px', borderRadius: '4px', border: '1px solid rgba(234,179,8,0.3)' }}>
-              🟡 PAPER TRADING
+              🛡️ FIREWALL
             </span>
           </div>
+
+          <button
+            onClick={handleToggleKillSwitch}
+            title="Emergency Kill Switch: instantly block all orders"
+            style={{
+              padding: '5px 10px',
+              fontSize: '11px',
+              fontWeight: 700,
+              borderRadius: '6px',
+              border: systemMode.kill_switch_active ? '1px solid #ef4444' : '1px solid #475569',
+              background: systemMode.kill_switch_active ? '#dc2626' : '#1e293b',
+              color: '#ffffff',
+              cursor: 'pointer',
+            }}
+          >
+            {systemMode.kill_switch_active ? '🛑 HALTED' : '🛡️ KILL SWITCH'}
+          </button>
+
+          <button
+            onClick={handleEmergencyFlatten}
+            title="Panic: Cancel all orders & close all positions"
+            style={{
+              padding: '5px 10px',
+              fontSize: '11px',
+              fontWeight: 700,
+              borderRadius: '6px',
+              border: '1px solid #dc2626',
+              background: 'rgba(220,38,38,0.2)',
+              color: '#fca5a5',
+              cursor: 'pointer',
+            }}
+          >
+            🚨 FLATTEN ALL
+          </button>
+
+          <button
+            onClick={() => setShowSettingsModal(true)}
+            title="Configure Alpaca broker credentials and Real-Money mode"
+            style={{
+              padding: '5px 10px',
+              fontSize: '11px',
+              fontWeight: 600,
+              borderRadius: '6px',
+              border: '1px solid #0284c7',
+              background: 'rgba(2,132,199,0.2)',
+              color: '#38bdf8',
+              cursor: 'pointer',
+            }}
+          >
+            ⚙️ BROKER CONFIG
+          </button>
 
           <button
             onClick={handleRunCycle}
@@ -336,6 +520,7 @@ export default function App() {
               fontWeight: 700,
               fontSize: '13px',
               boxShadow: '0 2px 8px rgba(29, 78, 216, 0.4)',
+              cursor: 'pointer',
             }}
           >
             <Play size={14} fill="currentColor" />
@@ -343,6 +528,27 @@ export default function App() {
           </button>
         </div>
       </header>
+
+      {/* Safety Alert Banners */}
+      {systemMode.is_live && systemMode.confirm_real_money && (
+        <div style={{ background: 'rgba(239,68,68,0.18)', borderBottom: '1px solid rgba(239,68,68,0.5)', padding: '8px 20px', color: '#fca5a5', fontSize: '12px', fontWeight: 600, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <span style={{ fontSize: '16px' }}>⚠️</span>
+            <span>LIVE REAL-MONEY TRADING IS ACTIVE: Orders execute with REAL CAPITAL on Alpaca Securities. Max Order Dollar Cap: ${systemMode.max_order_usd}</span>
+          </div>
+          <button onClick={handleEmergencyFlatten} style={{ background: '#ef4444', color: '#fff', border: 'none', borderRadius: '4px', padding: '4px 10px', fontSize: '11px', fontWeight: 700, cursor: 'pointer' }}>
+            PANIC CLOSE ALL
+          </button>
+        </div>
+      )}
+      {systemMode.kill_switch_active && (
+        <div style={{ background: 'rgba(220,38,38,0.25)', borderBottom: '1px solid #ef4444', padding: '8px 20px', color: '#fee2e2', fontSize: '12px', fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span>🛑 EMERGENCY KILL SWITCH IS ACTIVE: All new order submissions are halted by the Risk Firewall.</span>
+          <button onClick={handleToggleKillSwitch} style={{ background: '#10b981', color: '#fff', border: 'none', borderRadius: '4px', padding: '4px 10px', fontSize: '11px', fontWeight: 700, cursor: 'pointer' }}>
+            RESUME TRADING
+          </button>
+        </div>
+      )}
 
       {/* 2. KPI RIBBON */}
       <div
@@ -381,7 +587,7 @@ export default function App() {
 
         <div className="metric-box" style={{ background: 'var(--bg-surface)', padding: '10px 14px', borderRadius: '8px', border: '1px solid var(--border-subtle)' }}>
           <div style={{ fontSize: '11px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-            Alpaca Simulated Cash
+            {systemMode.is_live && systemMode.confirm_real_money ? '🔴 Alpaca Real Equity' : (systemMode.broker_connected ? '🟢 Alpaca Paper Equity' : '⚪ Alpaca Simulated Cash')}
           </div>
           <div className="mono" style={{ fontSize: '18px', fontWeight: 700, color: '#f8fafc', margin: '2px 0' }}>
             ${alpAcct.portfolio_value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
@@ -716,19 +922,29 @@ export default function App() {
               </div>
             )}
 
+            {systemMode.is_live && systemMode.confirm_real_money && (
+              <div style={{ color: '#f87171', fontSize: '11px', fontWeight: 600, marginBottom: '6px', textAlign: 'center' }}>
+                ⚠️ LIVE REAL-MONEY ORDER: Real funds will be debited.
+              </div>
+            )}
+
             <button
               onClick={handleSubmitAlpacaOrder}
+              disabled={systemMode.kill_switch_active}
               style={{
                 width: '100%',
                 padding: '8px',
                 borderRadius: '6px',
                 fontWeight: 700,
                 fontSize: '12px',
-                background: orderSide === 'buy' ? '#16a34a' : '#dc2626',
+                background: systemMode.kill_switch_active ? '#475569' : (orderSide === 'buy' ? '#16a34a' : '#dc2626'),
                 color: '#ffffff',
+                cursor: systemMode.kill_switch_active ? 'not-allowed' : 'pointer',
               }}
             >
-              Submit Simulated {orderSide.toUpperCase()} Order
+              {systemMode.kill_switch_active
+                ? 'ORDER HALTED (KILL SWITCH ACTIVE)'
+                : `Submit ${systemMode.is_live && systemMode.confirm_real_money ? 'LIVE REAL-MONEY' : 'Simulated'} ${orderSide.toUpperCase()} Order`}
             </button>
 
             {orderStatusMsg && (
@@ -955,6 +1171,242 @@ export default function App() {
           </div>
         )}
       </div>
+
+      {/* 5. BROKER & MODE CONFIGURATION MODAL */}
+      {showSettingsModal && (
+        <div
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.75)',
+            backdropFilter: 'blur(4px)',
+            zIndex: 9999,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '20px',
+          }}
+          onClick={(e) => {
+            if (e.target === e.currentTarget) setShowSettingsModal(false);
+          }}
+        >
+          <div
+            style={{
+              backgroundColor: '#0f172a',
+              border: '1px solid #334155',
+              borderRadius: '12px',
+              padding: '24px',
+              width: '540px',
+              maxWidth: '100%',
+              boxShadow: '0 20px 40px rgba(0, 0, 0, 0.6)',
+              color: '#f8fafc',
+            }}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '18px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '18px' }}>⚙️</span>
+                <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 700, color: '#f8fafc' }}>
+                  Broker & Execution Mode Settings
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowSettingsModal(false)}
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: 'var(--text-muted)',
+                  fontSize: '18px',
+                  cursor: 'pointer',
+                }}
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveMode}>
+              {/* Trading Mode Radio Group */}
+              <div style={{ marginBottom: '18px' }}>
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', marginBottom: '8px' }}>
+                  Execution Environment
+                </label>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '8px' }}>
+                  {[
+                    { id: 'MOCK', label: 'Offline Mock', desc: 'Simulated Engine' },
+                    { id: 'PAPER', label: 'Alpaca Paper', desc: 'Virtual Capital' },
+                    { id: 'LIVE', label: '🔴 Alpaca Live', desc: 'REAL MONEY' },
+                  ].map((m) => (
+                    <div
+                      key={m.id}
+                      onClick={() => setModeForm({ ...modeForm, trading_mode: m.id })}
+                      style={{
+                        padding: '10px',
+                        borderRadius: '8px',
+                        border: modeForm.trading_mode === m.id ? '2px solid #38bdf8' : '1px solid #334155',
+                        background: modeForm.trading_mode === m.id ? 'rgba(56, 189, 248, 0.1)' : '#1e293b',
+                        cursor: 'pointer',
+                        textAlign: 'center',
+                      }}
+                    >
+                      <div style={{ fontWeight: 700, fontSize: '12px', color: m.id === 'LIVE' ? '#ef4444' : '#f8fafc' }}>
+                        {m.label}
+                      </div>
+                      <div style={{ fontSize: '10px', color: 'var(--text-dim)', marginTop: '2px' }}>
+                        {m.desc}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Real Money Warning Card */}
+              {modeForm.trading_mode === 'LIVE' && (
+                <div
+                  style={{
+                    background: 'rgba(239, 68, 68, 0.15)',
+                    border: '1px solid rgba(239, 68, 68, 0.5)',
+                    borderRadius: '8px',
+                    padding: '12px 14px',
+                    marginBottom: '16px',
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#f87171', fontWeight: 700, fontSize: '12px', marginBottom: '6px' }}>
+                    <span>⚠️ CRITICAL FINANCIAL RISK NOTICE</span>
+                  </div>
+                  <p style={{ margin: 0, fontSize: '11px', color: '#fca5a5', lineHeight: '1.4' }}>
+                    You are enabling <strong>LIVE REAL-MONEY TRADING</strong> on Alpaca Securities (<code>https://api.alpaca.markets</code>).
+                    Orders executed manually or autonomously by AI agents will risk and debit <strong>REAL FUNDS</strong>.
+                    Ensure you have validated your strategy thoroughly in Paper mode.
+                  </p>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={modeForm.confirm_real_money}
+                      onChange={(e) => setModeForm({ ...modeForm, confirm_real_money: e.target.checked })}
+                      style={{ width: '16px', height: '16px', accentColor: '#ef4444' }}
+                    />
+                    <span style={{ fontSize: '11px', fontWeight: 600, color: '#f8fafc' }}>
+                      I explicitly confirm and authorize real-money live order execution.
+                    </span>
+                  </label>
+                </div>
+              )}
+
+              {/* Alpaca API Credentials */}
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                  Alpaca API Key ID (APCA-API-KEY-ID)
+                </label>
+                <input
+                  type="text"
+                  placeholder="e.g. PK..."
+                  value={modeForm.api_key}
+                  onChange={(e) => setModeForm({ ...modeForm, api_key: e.target.value })}
+                  style={{
+                    width: '100%',
+                    background: '#1e293b',
+                    color: '#f8fafc',
+                    border: '1px solid #334155',
+                    borderRadius: '6px',
+                    padding: '8px 10px',
+                    fontSize: '12px',
+                    fontFamily: 'monospace',
+                  }}
+                />
+              </div>
+
+              <div style={{ marginBottom: '14px' }}>
+                <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                  Alpaca Secret Key (APCA-API-SECRET-KEY)
+                </label>
+                <input
+                  type="password"
+                  placeholder="Secret key..."
+                  value={modeForm.secret_key}
+                  onChange={(e) => setModeForm({ ...modeForm, secret_key: e.target.value })}
+                  style={{
+                    width: '100%',
+                    background: '#1e293b',
+                    color: '#f8fafc',
+                    border: '1px solid #334155',
+                    borderRadius: '6px',
+                    padding: '8px 10px',
+                    fontSize: '12px',
+                    fontFamily: 'monospace',
+                  }}
+                />
+                <span style={{ fontSize: '10px', color: 'var(--text-dim)', marginTop: '2px', display: 'block' }}>
+                  Leave blank to retain current key or read from .env file.
+                </span>
+              </div>
+
+              {/* Risk Firewall Cap */}
+              <div style={{ marginBottom: '20px' }}>
+                <label style={{ display: 'block', fontSize: '11px', color: 'var(--text-muted)', marginBottom: '4px' }}>
+                  Max Order Cap ($ USD) - Risk Firewall Limit
+                </label>
+                <input
+                  type="number"
+                  min="10"
+                  step="50"
+                  value={modeForm.max_order_usd}
+                  onChange={(e) => setModeForm({ ...modeForm, max_order_usd: parseFloat(e.target.value) || 100 })}
+                  style={{
+                    width: '100%',
+                    background: '#1e293b',
+                    color: '#f8fafc',
+                    border: '1px solid #334155',
+                    borderRadius: '6px',
+                    padding: '8px 10px',
+                    fontSize: '12px',
+                    fontFamily: 'monospace',
+                  }}
+                />
+                <span style={{ fontSize: '10px', color: 'var(--text-dim)', marginTop: '2px', display: 'block' }}>
+                  Hard safety ceiling: individual orders exceeding this notional amount are blocked.
+                </span>
+              </div>
+
+              {/* Modal Buttons */}
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px' }}>
+                <button
+                  type="button"
+                  onClick={() => setShowSettingsModal(false)}
+                  style={{
+                    padding: '8px 14px',
+                    borderRadius: '6px',
+                    border: '1px solid #334155',
+                    background: '#1e293b',
+                    color: '#94a3b8',
+                    fontSize: '12px',
+                    fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  style={{
+                    padding: '8px 18px',
+                    borderRadius: '6px',
+                    border: 'none',
+                    background: modeForm.trading_mode === 'LIVE' ? '#dc2626' : '#2563eb',
+                    color: '#ffffff',
+                    fontSize: '12px',
+                    fontWeight: 700,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {modeForm.trading_mode === 'LIVE' ? 'Activate Real-Money Mode' : 'Save Configuration'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

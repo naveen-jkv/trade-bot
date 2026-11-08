@@ -17,6 +17,7 @@ from config import (
     ForexPairConfig,
     DEFAULT_CONFIG,
 )
+from core.asset_classes import is_alpaca_symbol, is_forex_symbol
 
 
 @dataclass
@@ -60,6 +61,15 @@ class RiskManager:
     def __init__(self, settings: Optional[RiskSettings] = None):
         self.settings = settings or DEFAULT_CONFIG.risk
         self.settings.validate_against_safety()
+        self.kill_switch_active: bool = False
+
+    def activate_kill_switch(self) -> None:
+        """Immediately halts all order approvals."""
+        self.kill_switch_active = True
+
+    def deactivate_kill_switch(self) -> None:
+        """Resumes normal risk evaluation."""
+        self.kill_switch_active = False
 
     def update_settings(self, new_settings: RiskSettings) -> None:
         """Updates configurable parameters after validating against hard safety limits."""
@@ -140,6 +150,21 @@ class RiskManager:
         reasons: List[str] = []
         is_approved = True
         risk_score = 0.1
+
+        if self.kill_switch_active:
+            return RiskValidationResult(
+                is_approved=False,
+                symbol=symbol,
+                action=action,
+                approved_lot_size=0.0,
+                entry_price=entry_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                risk_amount_dollars=0.0,
+                risk_reward_ratio=0.0,
+                reasons=["Emergency Kill Switch is ACTIVE. All trading halted."],
+                risk_score=1.0,
+            )
 
         if action not in ["BUY", "SELL"]:
             return RiskValidationResult(
@@ -265,3 +290,59 @@ class RiskManager:
             reasons=reasons,
             risk_score=min(1.0, risk_score),
         )
+
+    def validate_alpaca_order(
+        self,
+        symbol: str,
+        side: str,
+        qty: float,
+        price: float,
+        buying_power: float,
+        max_order_usd: float = 1000.0,
+    ) -> Tuple[bool, List[str], float]:
+        """
+        Audits an Alpaca order (US Equity or Crypto) against real-money risk rules.
+        Returns:
+            Tuple[is_approved, reasons, notional_value]
+        """
+        reasons: List[str] = []
+        is_approved = True
+
+        if self.kill_switch_active:
+            return False, ["EMERGENCY KILL SWITCH IS ACTIVE. Order rejected."], 0.0
+
+        if is_forex_symbol(symbol):
+            return False, [f"{symbol} is a Forex pair. Cannot route to Alpaca."], 0.0
+
+        if not is_alpaca_symbol(symbol):
+            reasons.append(f"Warning: {symbol} is not in standard Alpaca asset catalog.")
+
+        if side.lower() not in ("buy", "sell"):
+            return False, ["Side must be 'buy' or 'sell'."], 0.0
+
+        if qty <= 0:
+            return False, ["Order quantity must be positive."], 0.0
+
+        if price <= 0:
+            return False, ["Estimated price must be greater than zero."], 0.0
+
+        notional_value = qty * price
+
+        # Hard dollar cap per order
+        if notional_value > max_order_usd:
+            is_approved = False
+            reasons.append(
+                f"Order notional value (${notional_value:,.2f}) exceeds MAX_ORDER_USD limit (${max_order_usd:,.2f})."
+            )
+
+        # Buying power check for BUY orders
+        if side.lower() == "buy" and notional_value > buying_power:
+            is_approved = False
+            reasons.append(
+                f"Insufficient buying power: Required ${notional_value:,.2f} > Available ${buying_power:,.2f}."
+            )
+
+        if is_approved:
+            reasons.append("Risk validation PASSED for Alpaca order.")
+
+        return is_approved, reasons, round(notional_value, 2)
