@@ -15,6 +15,8 @@ import json
 import logging
 import os
 from pathlib import Path
+import random
+import time
 from typing import Dict, List, Optional, Any
 import uuid
 
@@ -130,22 +132,79 @@ class LiveAlpacaClient(AlpacaClientInterface):
         self.kill_switch_active = active
         logger.warning(f"LiveAlpacaClient Kill Switch set to {active}")
 
-    # --- HTTP Helper ---
+    # --- HTTP Helper with Exponential Backoff & Rate-Limit Handling ---
 
-    def _request(self, method: str, endpoint: str, params: Optional[Dict] = None, data: Optional[Dict] = None) -> requests.Response:
+    def _request(
+        self,
+        method: str,
+        endpoint: str,
+        params: Optional[Dict] = None,
+        data: Optional[Dict] = None,
+        max_retries: int = 3,
+    ) -> requests.Response:
+        """
+        Executes HTTP request against Alpaca REST v2 API with automatic retry
+        and exponential backoff for rate limits (429) and transient server errors (5xx).
+        """
         url = f"{self.base_url.rstrip('/')}/{endpoint.lstrip('/')}"
-        try:
-            resp = self.session.request(
-                method=method,
-                url=url,
-                params=params,
-                json=data,
-                timeout=self.timeout,
-            )
-            return resp
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Alpaca API network error on {method} {url}: {e}")
-            raise AlpacaAPIError(f"Network error connecting to Alpaca ({url}): {e}") from e
+        last_exception = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                resp = self.session.request(
+                    method=method,
+                    url=url,
+                    params=params,
+                    json=data,
+                    timeout=self.timeout,
+                )
+
+                # Rate Limit (429 Too Many Requests)
+                if resp.status_code == 429 and attempt < max_retries:
+                    retry_after_hdr = resp.headers.get("Retry-After")
+                    try:
+                        backoff = float(retry_after_hdr) if retry_after_hdr else (2.0 ** attempt)
+                    except (ValueError, TypeError):
+                        backoff = 2.0 ** attempt
+                    backoff += random.uniform(0.1, 0.4)
+                    logger.warning(
+                        f"Alpaca rate-limited (HTTP 429) on {method} {endpoint}. "
+                        f"Backing off for {backoff:.2f}s (retry {attempt + 1}/{max_retries})."
+                    )
+                    time.sleep(backoff)
+                    continue
+
+                # Transient Server Errors (500, 502, 503, 504)
+                if resp.status_code in (500, 502, 503, 504) and attempt < max_retries:
+                    backoff = (2.0 ** attempt) + random.uniform(0.1, 0.5)
+                    logger.warning(
+                        f"Alpaca server error (HTTP {resp.status_code}) on {method} {endpoint}. "
+                        f"Retrying in {backoff:.2f}s (retry {attempt + 1}/{max_retries})."
+                    )
+                    time.sleep(backoff)
+                    continue
+
+                return resp
+
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                last_exception = e
+                if attempt < max_retries:
+                    backoff = (1.5 ** attempt) + random.uniform(0.1, 0.3)
+                    logger.warning(
+                        f"Alpaca transient network error on {method} {url}: {e}. "
+                        f"Retrying in {backoff:.2f}s (retry {attempt + 1}/{max_retries})."
+                    )
+                    time.sleep(backoff)
+                else:
+                    logger.error(f"Alpaca API network error on {method} {url} after {max_retries} retries: {e}")
+                    raise AlpacaAPIError(f"Network error connecting to Alpaca ({url}): {e}") from e
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Alpaca API fatal request exception on {method} {url}: {e}")
+                raise AlpacaAPIError(f"Fatal request error connecting to Alpaca ({url}): {e}") from e
+
+        if last_exception:
+            raise AlpacaAPIError(f"Network error connecting to Alpaca ({url}): {last_exception}") from last_exception
+        return resp
 
     # --- Account Information ---
 

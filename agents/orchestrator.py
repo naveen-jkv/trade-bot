@@ -198,17 +198,48 @@ class AutonomousTradingAgent:
                 if price > 0:
                     raw_qty = notional / price
                     qty = round(raw_qty, 4) if "/" in symbol else max(1.0, round(raw_qty, 0))
-                    alpaca_order = self.alpaca_client.submit_order(
-                        symbol=symbol,
-                        qty=qty,
-                        side=risk_res.action.lower(),
-                        order_type="market",
-                        time_in_force="day",
-                        take_profit_price=risk_res.take_profit,
-                        stop_loss_price=risk_res.stop_loss,
-                    )
-                    if alpaca_order:
-                        executed_pos_dict = alpaca_order.to_dict()
+                    clean_sym = symbol.replace("/", "_")
+                    deterministic_cid = f"APCA_{clean_sym}_{cycle_id}"
+
+                    # Idempotency and rate/duplicate protection checks
+                    if self.db.is_order_submitted(deterministic_cid):
+                        self.db.store_log(
+                            agent_name="AutonomousTradingOrchestrator",
+                            level="WARNING",
+                            message=f"Duplicate order submission blocked for {symbol} (Client Order ID: {deterministic_cid}).",
+                            metadata={"symbol": symbol, "client_order_id": deterministic_cid, "cycle_id": cycle_id},
+                        )
+                    elif self.db.has_recent_order(symbol, window_minutes=15):
+                        self.db.store_log(
+                            agent_name="AutonomousTradingOrchestrator",
+                            level="WARNING",
+                            message=f"Order submission throttled for {symbol}: an active order was already submitted within the 15-minute bar window.",
+                            metadata={"symbol": symbol, "cycle_id": cycle_id},
+                        )
+                    else:
+                        alpaca_order = self.alpaca_client.submit_order(
+                            symbol=symbol,
+                            qty=qty,
+                            side=risk_res.action.lower(),
+                            order_type="market",
+                            time_in_force="day",
+                            client_order_id=deterministic_cid,
+                            take_profit_price=risk_res.take_profit,
+                            stop_loss_price=risk_res.stop_loss,
+                        )
+                        if alpaca_order:
+                            executed_pos_dict = alpaca_order.to_dict()
+                            self.db.store_order_submission(
+                                client_order_id=deterministic_cid,
+                                symbol=symbol,
+                                side=risk_res.action.lower(),
+                                qty=qty,
+                                order_type="market",
+                                status=alpaca_order.status,
+                                broker="alpaca",
+                                cycle_id=cycle_id,
+                                submitted_at=ts,
+                            )
             elif risk_res.approved_lot_size > 0:
                 new_pos = self.paper_trader.open_trade(
                     symbol=symbol,

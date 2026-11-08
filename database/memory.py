@@ -6,7 +6,7 @@ Allows semantic/contextual retrieval of historical decisions to inform future ac
 
 import sqlite3
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any, Tuple
 
@@ -160,6 +160,21 @@ class TradingMemoryDB:
             );
             """)
 
+            # 9. Order Submissions & Idempotency Audit Table
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS order_submissions (
+                client_order_id TEXT PRIMARY KEY,
+                symbol TEXT NOT NULL,
+                side TEXT NOT NULL,
+                qty REAL NOT NULL,
+                order_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                broker TEXT NOT NULL,
+                cycle_id TEXT,
+                submitted_at TEXT NOT NULL
+            );
+            """)
+
             # Indices for rapid querying
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_hyp_sym ON hypotheses(symbol, timestamp);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_sym ON trades(symbol, entry_time);")
@@ -167,6 +182,7 @@ class TradingMemoryDB:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_lessons_regime ON lessons_learned(symbol, regime);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_logs_agent ON agent_logs(agent_name, timestamp);")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_alpaca_orders ON alpaca_mock_orders(symbol, created_at);")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_order_sub_sym ON order_submissions(symbol, submitted_at);")
 
             conn.commit()
 
@@ -588,4 +604,75 @@ class TradingMemoryDB:
             conn.execute("DELETE FROM alpaca_mock_orders")
             conn.execute("DELETE FROM alpaca_mock_positions")
             conn.commit()
+
+    # --- Order Idempotency & Deduplication ---
+
+    def store_order_submission(
+        self,
+        client_order_id: str,
+        symbol: str,
+        side: str,
+        qty: float,
+        order_type: str = "market",
+        status: str = "SUBMITTED",
+        broker: str = "alpaca",
+        cycle_id: Optional[str] = None,
+        submitted_at: Optional[str] = None,
+    ) -> None:
+        """Records an order submission attempt for deterministic idempotency audits."""
+        ts = submitted_at or datetime.now(timezone.utc).isoformat()
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO order_submissions (
+                    client_order_id, symbol, side, qty, order_type,
+                    status, broker, cycle_id, submitted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                client_order_id,
+                symbol,
+                side.lower(),
+                float(qty),
+                order_type.lower(),
+                status.upper(),
+                broker.lower(),
+                cycle_id,
+                ts,
+            ))
+            conn.commit()
+
+    def is_order_submitted(self, client_order_id: str) -> bool:
+        """Checks if an order with the given deterministic client_order_id was already processed."""
+        if not client_order_id:
+            return False
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM order_submissions WHERE client_order_id = ? LIMIT 1", (client_order_id,))
+            return cursor.fetchone() is not None
+
+    def has_recent_order(self, symbol: str, window_minutes: int = 15) -> bool:
+        """Checks if an order was already submitted for this symbol within the lookback window."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT 1 FROM order_submissions WHERE symbol = ? AND submitted_at >= ? LIMIT 1",
+                (symbol, cutoff)
+            )
+            return cursor.fetchone() is not None
+
+    def get_submitted_orders(self, symbol: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+        """Retrieves historical submitted orders for auditing."""
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if symbol:
+                cursor.execute(
+                    "SELECT * FROM order_submissions WHERE symbol = ? ORDER BY submitted_at DESC LIMIT ?",
+                    (symbol, limit)
+                )
+            else:
+                cursor.execute(
+                    "SELECT * FROM order_submissions ORDER BY submitted_at DESC LIMIT ?",
+                    (limit,)
+                )
+            return [dict(r) for r in cursor.fetchall()]
 
