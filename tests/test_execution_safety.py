@@ -156,3 +156,4 @@ def test_backtester_engine_execution_and_analytics():
     assert "test_samples" in wf_res
     assert "profit_factor_retention" in wf_res
     assert "is_walk_forward_passed" in wf_res
+

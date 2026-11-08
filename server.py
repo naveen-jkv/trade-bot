@@ -23,6 +23,7 @@ from config import DEFAULT_CONFIG, SUPPORTED_PAIRS, SAFETY_LIMITS
 from agents.orchestrator import AutonomousTradingAgent, CycleExecutionSummary
 from core.asset_classes import ALPACA_SUPPORTED_ASSETS, get_asset_class, AssetClass
 from core.market_data_abstraction import UnifiedMarketDataRouter, DataSourceType, get_data_source_badge
+from core.alerting import default_alert_manager, AlertEvent, AlertSeverity
 
 
 # Shared persistent agent instance
@@ -475,6 +476,14 @@ async def emergency_flatten_all():
         "forex_positions_closed": len(forex_closed),
         "alpaca_positions_liquidated": len(alpaca_liquidated),
     })
+
+    default_alert_manager.send_alert(
+        event=AlertEvent.EMERGENCY_FLATTEN,
+        severity=AlertSeverity.CRITICAL,
+        title="EMERGENCY FLATTEN EXECUTED",
+        message=f"Panic button triggered: Liquidated {len(forex_closed)} Forex and {len(alpaca_liquidated)} Alpaca positions. Kill switch engaged.",
+        metadata={"forex_closed": len(forex_closed), "alpaca_liquidated": len(alpaca_liquidated)},
+    )
 
     return {
         "status": "FLATTENED",

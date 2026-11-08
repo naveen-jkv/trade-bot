@@ -18,6 +18,7 @@ from config import (
     DEFAULT_CONFIG,
 )
 from core.asset_classes import is_alpaca_symbol, is_forex_symbol
+from core.alerting import default_alert_manager, AlertEvent, AlertSeverity
 
 
 @dataclass
@@ -66,10 +67,22 @@ class RiskManager:
     def activate_kill_switch(self) -> None:
         """Immediately halts all order approvals."""
         self.kill_switch_active = True
+        default_alert_manager.send_alert(
+            event=AlertEvent.KILL_SWITCH_ENGAGED,
+            severity=AlertSeverity.CRITICAL,
+            title="Trading Kill Switch Engaged",
+            message="Kill switch has been activated. All new order submissions and approvals are locked.",
+        )
 
     def deactivate_kill_switch(self) -> None:
         """Resumes normal risk evaluation."""
         self.kill_switch_active = False
+        default_alert_manager.send_alert(
+            event=AlertEvent.KILL_SWITCH_DISENGAGED,
+            severity=AlertSeverity.INFO,
+            title="Trading Kill Switch Disengaged",
+            message="Kill switch has been deactivated. Normal risk assessment resumed.",
+        )
 
     def update_settings(self, new_settings: RiskSettings) -> None:
         """Updates configurable parameters after validating against hard safety limits."""
@@ -255,6 +268,13 @@ class RiskManager:
                     f"Daily Drawdown ceiling reached: {daily_loss_pct:.1f}% >= {max_daily_dd:.1f}% (Baseline Equity: ${daily_baseline:,.2f}). Cooldown active."
                 )
                 risk_score = 1.0
+                default_alert_manager.send_alert(
+                    event=AlertEvent.DAILY_DRAWDOWN_BREACH,
+                    severity=AlertSeverity.CRITICAL,
+                    title="Daily Drawdown Ceiling Breached",
+                    message=f"Current daily loss {daily_loss_pct:.1f}% exceeded max limit {max_daily_dd:.1f}% against baseline ${daily_baseline:,.2f}.",
+                    metadata={"current_equity": current_equity, "daily_baseline": daily_baseline, "daily_loss_pct": daily_loss_pct},
+                )
 
         # 5. Check Spread Ceiling
         pair_cfg = SUPPORTED_PAIRS.get(symbol, SUPPORTED_PAIRS["EUR/USD"])

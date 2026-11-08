@@ -171,6 +171,16 @@ class AlpacaSettings:
 
 
 @dataclass
+class AlertSettings:
+    """Operational notification configuration (Telegram, Discord, Webhooks)."""
+    telegram_bot_token: str = field(default_factory=lambda: os.getenv("TELEGRAM_BOT_TOKEN", "").strip())
+    telegram_chat_id: str = field(default_factory=lambda: os.getenv("TELEGRAM_CHAT_ID", "").strip())
+    discord_webhook_url: str = field(default_factory=lambda: os.getenv("DISCORD_WEBHOOK_URL", "").strip())
+    generic_webhook_url: str = field(default_factory=lambda: os.getenv("ALERT_WEBHOOK_URL", "").strip())
+    enabled: bool = field(default_factory=lambda: os.getenv("ALERTS_ENABLED", "true").lower() in ("true", "1", "yes"))
+
+
+@dataclass
 class SystemConfig:
     default_pair: str = "EUR/USD"
     default_timeframe: str = "1h"
@@ -178,6 +188,7 @@ class SystemConfig:
     ml: MLSettings = field(default_factory=MLSettings)
     llm: LLMSettings = field(default_factory=LLMSettings)
     alpaca: AlpacaSettings = field(default_factory=AlpacaSettings)
+    alerts: AlertSettings = field(default_factory=AlertSettings)
     db_path: Path = DB_PATH
     data_dir: Path = DATA_DIR
     models_dir: Path = MODELS_DIR

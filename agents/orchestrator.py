@@ -27,6 +27,7 @@ from core.alpaca_interface import AlpacaClientInterface
 from core.alpaca_mock_client import MockAlpacaClient
 from core.alpaca_factory import create_alpaca_client
 from core.asset_classes import is_forex_symbol, is_alpaca_symbol
+from core.alerting import default_alert_manager, AlertEvent, AlertSeverity
 
 
 @dataclass
@@ -240,6 +241,13 @@ class AutonomousTradingAgent:
                                 cycle_id=cycle_id,
                                 submitted_at=ts,
                             )
+                            default_alert_manager.send_alert(
+                                event=AlertEvent.TRADE_OPENED,
+                                severity=AlertSeverity.INFO,
+                                title=f"Alpaca Order Submitted: {risk_res.action} {qty} {symbol}",
+                                message=f"Order {alpaca_order.id} ({alpaca_order.status}) submitted for {symbol} at mark price ${price:.2f}.",
+                                metadata={"client_order_id": deterministic_cid, "qty": qty, "symbol": symbol, "status": alpaca_order.status},
+                            )
             elif risk_res.approved_lot_size > 0:
                 new_pos = self.paper_trader.open_trade(
                     symbol=symbol,
@@ -253,6 +261,13 @@ class AutonomousTradingAgent:
                 )
                 if new_pos:
                     executed_pos_dict = new_pos.to_dict()
+                    default_alert_manager.send_alert(
+                        event=AlertEvent.TRADE_OPENED,
+                        severity=AlertSeverity.INFO,
+                        title=f"Forex Trade Opened: {risk_res.action} {risk_res.approved_lot_size} lots {symbol}",
+                        message=f"Position {new_pos.ticket_id} opened at {new_pos.entry_price:.5f} (SL: {new_pos.stop_loss:.5f}, TP: {new_pos.take_profit:.5f}).",
+                        metadata={"ticket_id": new_pos.ticket_id, "lots": risk_res.approved_lot_size, "symbol": symbol},
+                    )
 
         # Step 8: Get updated portfolio snapshot
         portfolio_summary = self.paper_trader.get_portfolio_summary()

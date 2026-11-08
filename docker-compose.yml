@@ -1,0 +1,28 @@
+services:
+  trade-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: trade-bot
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - TRADING_MODE=PAPER
+      - CONFIRM_REAL_MONEY_TRADING=FALSE
+      - PYTHONUNBUFFERED=1
+    volumes:
+      - ./data:/app/data
+      - trade-memory:/app
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/system/mode"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  trade-memory:

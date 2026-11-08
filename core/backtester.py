@@ -400,3 +400,4 @@ class BacktestEngine:
             trades=[],
             equity_curve=[],
         )
+
