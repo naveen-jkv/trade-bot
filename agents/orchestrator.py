@@ -169,6 +169,7 @@ class AutonomousTradingAgent:
                 open_positions=open_pos_list,
                 current_spread_pips=pair_cfg.typical_spread_pips,
                 trend_direction=report.technical_state.trend_direction,
+                day_start_equity=getattr(self.paper_trader, "day_start_equity", self.paper_trader.initial_balance),
             )
         else:
             risk_res = RiskValidationResult(
@@ -203,6 +204,8 @@ class AutonomousTradingAgent:
                         side=risk_res.action.lower(),
                         order_type="market",
                         time_in_force="day",
+                        take_profit_price=risk_res.take_profit,
+                        stop_loss_price=risk_res.stop_loss,
                     )
                     if alpaca_order:
                         executed_pos_dict = alpaca_order.to_dict()

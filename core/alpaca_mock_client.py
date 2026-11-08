@@ -142,6 +142,8 @@ class MockAlpacaClient(AlpacaClientInterface):
         limit_price: Optional[float] = None,
         stop_price: Optional[float] = None,
         client_order_id: Optional[str] = None,
+        take_profit_price: Optional[float] = None,
+        stop_loss_price: Optional[float] = None,
     ) -> AlpacaOrder:
         """
         Executes a simulated order against the mock matching engine.

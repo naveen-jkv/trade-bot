@@ -8,6 +8,7 @@ Strictly prohibited from modifying hard safety rules.
 
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+import logging
 from typing import Dict, List, Optional, Any, Tuple
 import numpy as np
 import pandas as pd
@@ -15,6 +16,8 @@ import pandas as pd
 from core.paper_trader import ClosedTrade
 from database.memory import TradingMemoryDB
 from config import DEFAULT_CONFIG, SAFETY_LIMITS
+
+logger = logging.getLogger("PerformanceEvaluationAgent")
 
 
 @dataclass
@@ -68,8 +71,8 @@ class PerformanceEvaluationAgent:
                     actual_direction=actual_dir,
                     is_correct=is_win,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Failed to evaluate prediction {prediction_id}: {e}")
 
         # 2. Diagnose mistakes and formulate rules
         mistake_cat = "NONE"
@@ -131,8 +134,8 @@ class PerformanceEvaluationAgent:
                 message=f"Evaluated Trade {trade.ticket_id} ({trade.symbol} {trade.action}) -> Outcome: {'WIN' if is_win else 'LOSS'} (${trade.pnl_dollars:+.2f}) | Rule: {lesson_rule[:80]}...",
                 metadata={"ticket_id": trade.ticket_id, "is_win": is_win, "pnl": trade.pnl_dollars},
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to persist trade evaluation log for {trade.ticket_id}: {e}")
 
         return EvaluationReport(
             ticket_id=trade.ticket_id,
@@ -196,23 +199,25 @@ class PerformanceEvaluationAgent:
                         trades.append({"pnl": entry_px - tp_px, "win": True})
                         in_pos = False
             else:
-                # Signal: EMA crossover + RSI confirmation
+                # Signal: EMA crossover + RSI confirmation evaluated on bar i close
                 ema_9 = row.get("ema_9", c)
                 ema_21 = row.get("ema_21", c)
                 rsi = row.get("rsi_14", 50.0)
+                next_bar = test_df.iloc[i + 1]
+                next_open = next_bar["open"]
 
                 if ema_9 > ema_21 and rsi > 52.0:
                     in_pos = True
                     pos_dir = "BUY"
-                    entry_px = c
-                    sl_px = c - (atr * experimental_atr_mult)
-                    tp_px = c + (atr * experimental_atr_mult * 1.5)
+                    entry_px = next_open  # Enter at next bar's open (avoids lookahead bias)
+                    sl_px = entry_px - (atr * experimental_atr_mult)
+                    tp_px = entry_px + (atr * experimental_atr_mult * 1.5)
                 elif ema_9 < ema_21 and rsi < 48.0:
                     in_pos = True
                     pos_dir = "SELL"
-                    entry_px = c
-                    sl_px = c + (atr * experimental_atr_mult)
-                    tp_px = c - (atr * experimental_atr_mult * 1.5)
+                    entry_px = next_open  # Enter at next bar's open (avoids lookahead bias)
+                    sl_px = entry_px + (atr * experimental_atr_mult)
+                    tp_px = entry_px - (atr * experimental_atr_mult * 1.5)
 
         total_sim = len(trades)
         wins = [t for t in trades if t["win"]]
@@ -222,7 +227,19 @@ class PerformanceEvaluationAgent:
         gross_profit = sum(t["pnl"] for t in wins) if wins else 0.0
         gross_loss = abs(sum(t["pnl"] for t in losses)) if losses else 0.0
         pf = (gross_profit / gross_loss) if gross_loss > 0 else (2.0 if gross_profit > 0 else 1.0)
-        max_dd = 3.2  # Max drawdown during OOS test
+        
+        # Calculate dynamic peak-to-trough max drawdown on simulated equity curve
+        if trades:
+            eq_curve = [10000.0]
+            for t in trades:
+                dollar_pnl = t["pnl"] * 100000.0  # Standard lot notional
+                eq_curve.append(eq_curve[-1] + dollar_pnl)
+            eq_arr = np.array(eq_curve)
+            running_peak = np.maximum.accumulate(eq_arr)
+            drawdowns = np.where(running_peak > 0, (running_peak - eq_arr) / running_peak * 100.0, 0.0)
+            max_dd = float(np.max(drawdowns))
+        else:
+            max_dd = 0.0
 
         # Validation criterion: Win rate >= 50% and Profit Factor >= 1.25 and Max DD <= 5.0%
         is_validated = (win_rate >= 50.0 and pf >= 1.25 and max_dd <= SAFETY_LIMITS["ABSOLUTE_MAX_DAILY_DRAWDOWN_PCT"])
@@ -240,8 +257,8 @@ class PerformanceEvaluationAgent:
                 parameters=params,
                 validated=is_validated,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to persist strategy evaluation: {e}")
 
         return {
             "strategy_name": "EMA_Cross_Adaptive_ATR",

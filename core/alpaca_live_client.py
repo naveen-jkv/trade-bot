@@ -200,6 +200,8 @@ class LiveAlpacaClient(AlpacaClientInterface):
         limit_price: Optional[float] = None,
         stop_price: Optional[float] = None,
         client_order_id: Optional[str] = None,
+        take_profit_price: Optional[float] = None,
+        stop_loss_price: Optional[float] = None,
     ) -> AlpacaOrder:
         """
         Submits an order to the Alpaca REST v2 API.
@@ -292,6 +294,14 @@ class LiveAlpacaClient(AlpacaClientInterface):
             payload["limit_price"] = str(round(float(limit_price), 4))
         if type_clean in ("stop", "stop_limit") and stop_price is not None:
             payload["stop_price"] = str(round(float(stop_price), 4))
+
+        # Exchange-level Bracket Orders (Automated Take-Profit & Stop-Loss directly on Alpaca)
+        if take_profit_price is not None or stop_loss_price is not None:
+            payload["order_class"] = "bracket"
+            if take_profit_price is not None:
+                payload["take_profit"] = {"limit_price": str(round(float(take_profit_price), 4))}
+            if stop_loss_price is not None:
+                payload["stop_loss"] = {"stop_price": str(round(float(stop_loss_price), 4))}
 
         # Submit to Alpaca REST API
         try:

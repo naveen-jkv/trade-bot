@@ -311,7 +311,18 @@ class TradingPredictor:
             return np.array(xs, dtype=np.float32), np.array(ys, dtype=np.int64)
 
         X_tr_seq, y_tr_seq = make_sequences(X_tr, y_tr, seq_len)
-        X_te_seq, y_te_seq = make_sequences(X_te, y_te, seq_len)
+
+        # Seed test sequence generation using trailing training bars to evaluate all test samples without truncation
+        if len(X_tr) >= seq_len:
+            X_seed = X_tr[-seq_len:]
+            X_te_combined = np.vstack([X_seed, X_te])
+            xs_te = []
+            for i in range(len(y_te)):
+                xs_te.append(X_te_combined[i:(i + seq_len)])
+            X_te_seq = np.array(xs_te, dtype=np.float32)
+            y_te_seq = np.array(y_te, dtype=np.int64)
+        else:
+            X_te_seq, y_te_seq = make_sequences(X_te, y_te, seq_len)
 
         if len(X_tr_seq) < 10 or len(X_te_seq) < 5:
             return 50.0

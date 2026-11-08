@@ -54,6 +54,8 @@ class AlpacaClientInterface(ABC):
         limit_price: Optional[float] = None,
         stop_price: Optional[float] = None,
         client_order_id: Optional[str] = None,
+        take_profit_price: Optional[float] = None,
+        stop_loss_price: Optional[float] = None,
     ) -> AlpacaOrder:
         """Submits an order according to the Alpaca v2 order specification."""
         pass

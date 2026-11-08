@@ -9,6 +9,7 @@ Never invents prices or claims certainty.
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from typing import Dict, List, Optional, Any
 import requests
@@ -16,6 +17,8 @@ import requests
 from agents.market_agent import MarketAnalysisReport
 from database.memory import TradingMemoryDB
 from config import LLMSettings, DEFAULT_CONFIG, SUPPORTED_PAIRS
+
+logger = logging.getLogger("AIResearchAgent")
 
 
 @dataclass
@@ -121,8 +124,8 @@ class AIResearchAgent:
                 message=f"Formulated hypothesis for {report.symbol}: {hypothesis_dict['direction']} (Conf: {hypothesis_dict['confidence']:.2f}) - {hypothesis_dict['hypothesis_text'][:90]}...",
                 metadata={"hypothesis_id": hyp_id, "provider": provider_used},
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to persist research hypothesis to DB: {e}")
 
         return TradingHypothesis(
             id=hyp_id,
@@ -207,8 +210,8 @@ Generate a JSON response with exactly these keys:
                 res = json.loads(text)
                 res["model_tag"] = f"Gemini ({self.settings.gemini_model})"
                 return self._sanitize_hypothesis(res, report)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Gemini API query failed: {e}")
         return None
 
     def _query_openai(self, report: MarketAnalysisReport, lessons: List[str]) -> Optional[Dict[str, Any]]:
@@ -237,8 +240,8 @@ Generate a JSON response with exactly these keys:
                 res = json.loads(content)
                 res["model_tag"] = f"OpenAI ({self.settings.openai_model})"
                 return self._sanitize_hypothesis(res, report)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"OpenAI API query failed: {e}")
         return None
 
     def _query_ollama(self, report: MarketAnalysisReport, lessons: List[str]) -> Optional[Dict[str, Any]]:
@@ -260,8 +263,8 @@ Generate a JSON response with exactly these keys:
                 res = json.loads(content)
                 res["model_tag"] = f"Ollama ({self.settings.ollama_model})"
                 return self._sanitize_hypothesis(res, report)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Ollama query failed: {e}")
         return None
 
     def _deterministic_quant_reasoning(

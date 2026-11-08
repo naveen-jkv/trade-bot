@@ -78,6 +78,7 @@ SAFETY_LIMITS = {
     "ABSOLUTE_MAX_TOTAL_DRAWDOWN_PCT": 12.0,  # %
     "ABSOLUTE_MIN_RR_RATIO": 1.2,             # Minimum risk-reward
     "MAX_OPEN_POSITIONS": 5,                  # Portfolio cap
+    "MAX_CURRENCY_EXPOSURE": 3,               # Max concurrent positions in same currency direction
 }
 
 
@@ -87,6 +88,7 @@ class RiskSettings:
     initial_balance: float = 10000.0
     risk_per_trade_pct: float = 1.5           # Default 1.5% per trade
     max_open_positions: int = 3               # Max concurrent positions
+    max_currency_exposure: int = 2            # Max concurrent directional exposure per currency
     max_daily_drawdown_pct: float = 3.5       # Daily stop-trading ceiling
     max_total_drawdown_pct: float = 8.0       # Max drawdown pause
     min_risk_reward_ratio: float = 1.5        # Target at least 1:1.5 RR
@@ -107,6 +109,8 @@ class RiskSettings:
             self.min_risk_reward_ratio = SAFETY_LIMITS["ABSOLUTE_MIN_RR_RATIO"]
         if self.max_open_positions > SAFETY_LIMITS["MAX_OPEN_POSITIONS"]:
             self.max_open_positions = SAFETY_LIMITS["MAX_OPEN_POSITIONS"]
+        if self.max_currency_exposure > SAFETY_LIMITS["MAX_CURRENCY_EXPOSURE"]:
+            self.max_currency_exposure = SAFETY_LIMITS["MAX_CURRENCY_EXPOSURE"]
 
 
 @dataclass

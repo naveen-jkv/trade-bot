@@ -7,6 +7,7 @@ margin calculations, and institutional-grade performance analytics.
 
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 import uuid
@@ -21,6 +22,8 @@ from config import (
     DB_PATH,
 )
 from database.memory import TradingMemoryDB
+
+logger = logging.getLogger("PaperTrader")
 
 
 @dataclass
@@ -86,6 +89,8 @@ class PaperTradingSimulator:
         self.equity = float(self.initial_balance)
         self.peak_equity = float(self.initial_balance)
         self.margin_used = 0.0
+        self.day_start_equity = float(self.initial_balance)
+        self.current_trading_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
         self.open_positions: Dict[str, Position] = {}
         self.closed_trades: List[ClosedTrade] = []
@@ -130,8 +135,9 @@ class PaperTradingSimulator:
             self.balance = round(self.initial_balance + net_closed_pnl, 2)
             self.equity = self.balance
             self.peak_equity = max(self.peak_equity, self.balance)
-        except Exception:
-            pass
+            self.day_start_equity = self.equity
+        except Exception as e:
+            logger.warning(f"Failed to restore state from database: {e}")
 
     def get_pip_value(self, symbol: str, current_price: float, lots: float) -> float:
         """Computes pip value in account currency (USD)."""
@@ -227,8 +233,8 @@ class PaperTradingSimulator:
                 message=f"Opened {action} {lots} lots on {symbol} @ {pos.entry_price:.5f} (SL: {stop_loss:.5f}, TP: {take_profit:.5f})",
                 metadata={"ticket_id": ticket_id, "hypothesis_id": hypothesis_id},
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to persist trade open for ticket {ticket_id}: {e}")
 
         return pos
 
@@ -309,8 +315,8 @@ class PaperTradingSimulator:
                 message=f"Closed {pos.action} on {pos.symbol} @ {exit_price:.5f} ({exit_reason}) -> PnL: ${closed.pnl_dollars:+.2f} ({closed.pips:+.1f} pips)",
                 metadata={"ticket_id": ticket_id, "pnl": closed.pnl_dollars},
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"Failed to persist trade close for ticket {ticket_id}: {e}")
 
         return closed
 
@@ -335,6 +341,12 @@ class PaperTradingSimulator:
             ts = str(ts_raw)
         else:
             ts = datetime.now(timezone.utc).isoformat()
+
+        # Update trading day and day-start equity baseline on day rollover
+        candle_day = ts[:10]
+        if candle_day != self.current_trading_day:
+            self.current_trading_day = candle_day
+            self.day_start_equity = self.equity
 
         closed_this_bar: List[ClosedTrade] = []
         tickets_to_close: List[Tuple[str, float, str]] = []
@@ -422,6 +434,7 @@ class PaperTradingSimulator:
 
         return {
             "initial_balance": self.initial_balance,
+            "day_start_equity": round(self.day_start_equity, 2),
             "balance": round(self.balance, 2),
             "equity": round(self.equity, 2),
             "free_margin": round(self.equity - self.margin_used, 2),

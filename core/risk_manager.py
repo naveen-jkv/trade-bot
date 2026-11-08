@@ -134,6 +134,7 @@ class RiskManager:
         open_positions: List[Dict[str, Any]],
         current_spread_pips: float = 1.5,
         trend_direction: str = "NEUTRAL",
+        day_start_equity: Optional[float] = None,
     ) -> RiskValidationResult:
         """
         Strictly audits a proposed trading action.
@@ -141,11 +142,12 @@ class RiskManager:
         1. Action validity (BUY/SELL)
         2. Maximum open positions cap
         3. Existing exposure on same symbol
-        4. Current drawdown vs daily / total drawdown ceilings
-        5. Spread reasonableness
-        6. Stop-loss placement & validity
-        7. Minimum Risk-to-Reward ratio
-        8. Counter-trend filters
+        4. Currency-level directional exposure limit
+        5. Current drawdown vs daily / total drawdown ceilings
+        6. Spread reasonableness
+        7. Stop-loss placement & validity
+        8. Minimum Risk-to-Reward ratio
+        9. Counter-trend filters
         """
         reasons: List[str] = []
         is_approved = True
@@ -196,7 +198,42 @@ class RiskManager:
                 risk_score += 0.2
                 break
 
-        # 3. Check Peak Drawdown (Total Drawdown)
+        # 3. Check Currency-Level Exposure Limits (Prevents correlated cluster risk)
+        currencies_in_pair = symbol.split("/") if "/" in symbol else []
+        if len(currencies_in_pair) == 2:
+            base_curr, quote_curr = currencies_in_pair[0], currencies_in_pair[1]
+            proposed_long = base_curr if action == "BUY" else quote_curr
+            proposed_short = quote_curr if action == "BUY" else base_curr
+
+            long_count = 1
+            short_count = 1
+            for pos in open_positions:
+                pos_sym = pos.get("symbol", "")
+                pos_act = pos.get("action", "")
+                if "/" in pos_sym:
+                    b, q = pos_sym.split("/")
+                    p_long = b if pos_act == "BUY" else q
+                    p_short = q if pos_act == "BUY" else b
+                    if p_long == proposed_long:
+                        long_count += 1
+                    if p_short == proposed_short:
+                        short_count += 1
+
+            max_curr = getattr(self.settings, "max_currency_exposure", SAFETY_LIMITS.get("MAX_CURRENCY_EXPOSURE", 2))
+            if long_count > max_curr:
+                is_approved = False
+                reasons.append(
+                    f"Currency exposure limit breached: too many Long {proposed_long} exposures ({long_count} > max {max_curr})."
+                )
+                risk_score += 0.25
+            if short_count > max_curr:
+                is_approved = False
+                reasons.append(
+                    f"Currency exposure limit breached: too many Short {proposed_short} exposures ({short_count} > max {max_curr})."
+                )
+                risk_score += 0.25
+
+        # 4. Check Peak Drawdown (Total Drawdown)
         if peak_equity > 0:
             total_drawdown_pct = ((peak_equity - current_equity) / peak_equity) * 100.0
             max_allowed_dd = min(self.settings.max_total_drawdown_pct, SAFETY_LIMITS["ABSOLUTE_MAX_TOTAL_DRAWDOWN_PCT"])
@@ -207,14 +244,15 @@ class RiskManager:
                 )
                 risk_score = 1.0
 
-        # 4. Check Daily Drawdown from initial balance reference
-        if initial_balance > 0:
-            daily_loss_pct = ((initial_balance - current_equity) / initial_balance) * 100.0
+        # 5. Check Daily Drawdown from Day-Start Baseline (resets each calendar day)
+        daily_baseline = day_start_equity if (day_start_equity is not None and day_start_equity > 0) else initial_balance
+        if daily_baseline > 0:
+            daily_loss_pct = ((daily_baseline - current_equity) / daily_baseline) * 100.0
             max_daily_dd = min(self.settings.max_daily_drawdown_pct, SAFETY_LIMITS["ABSOLUTE_MAX_DAILY_DRAWDOWN_PCT"])
             if daily_loss_pct >= max_daily_dd:
                 is_approved = False
                 reasons.append(
-                    f"Daily Drawdown ceiling reached: {daily_loss_pct:.1f}% >= {max_daily_dd:.1f}%. Cooldown active."
+                    f"Daily Drawdown ceiling reached: {daily_loss_pct:.1f}% >= {max_daily_dd:.1f}% (Baseline Equity: ${daily_baseline:,.2f}). Cooldown active."
                 )
                 risk_score = 1.0
 

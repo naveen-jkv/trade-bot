@@ -98,4 +98,66 @@ def test_approve_valid_proposal():
     )
     assert res.is_approved
     assert res.approved_lot_size > 0
-    assert any("PASSED" in r for r in res.reasons)
+
+
+def test_daily_drawdown_evaluated_against_day_start_equity():
+    """Validates that daily drawdown triggers against day_start_equity even when account has grown overall."""
+    rm = RiskManager()
+    # Account grew from $10k initial balance to $16k peak and started the day at $16k.
+    # Today equity dropped to $15,300 (4.375% daily drop, exceeding max 3.5%).
+    res = rm.validate_proposal(
+        symbol="EUR/USD",
+        action="BUY",
+        entry_price=1.1000,
+        stop_loss=1.0950,
+        take_profit=1.1100,
+        current_equity=15300.0,
+        initial_balance=10000.0,
+        peak_equity=16000.0,
+        day_start_equity=16000.0,
+        open_positions=[],
+        trend_direction="BULLISH",
+    )
+    assert not res.is_approved
+    assert any("Daily Drawdown ceiling reached" in r for r in res.reasons)
+
+
+def test_currency_level_directional_exposure_limit():
+    """Validates that concurrent positions in the same currency direction are capped."""
+    rm = RiskManager(settings=RiskSettings(max_currency_exposure=2))
+    # Two open positions that are both Short USD (Long GBP, Long EUR)
+    existing_positions = [
+        {"symbol": "GBP/USD", "action": "BUY"},
+        {"symbol": "EUR/USD", "action": "BUY"},
+    ]
+    # Proposing a 3rd Short USD position (Long AUD/USD)
+    res_rejected = rm.validate_proposal(
+        symbol="AUD/USD",
+        action="BUY",
+        entry_price=0.6500,
+        stop_loss=0.6450,
+        take_profit=0.6600,
+        current_equity=10000.0,
+        initial_balance=10000.0,
+        peak_equity=10000.0,
+        open_positions=existing_positions,
+        trend_direction="BULLISH",
+    )
+    assert not res_rejected.is_approved
+    assert any("Currency exposure limit breached" in r for r in res_rejected.reasons)
+
+    # Proposing a Long USD position (BUY USD/CAD) should be approved as USD Long count is only 1
+    res_approved = rm.validate_proposal(
+        symbol="USD/CAD",
+        action="BUY",
+        entry_price=1.3500,
+        stop_loss=1.3450,
+        take_profit=1.3600,
+        current_equity=10000.0,
+        initial_balance=10000.0,
+        peak_equity=10000.0,
+        open_positions=existing_positions,
+        trend_direction="BULLISH",
+    )
+    assert res_approved.is_approved
+    assert any("PASSED" in r for r in res_approved.reasons)

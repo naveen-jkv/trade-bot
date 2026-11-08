@@ -9,11 +9,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 import datetime
+import logging
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
 from config import SUPPORTED_PAIRS, DATA_DIR, ForexPairConfig
+
+logger = logging.getLogger("MarketData")
 
 
 class DataSourceType(str, Enum):
@@ -95,16 +98,34 @@ class MarketDataProvider:
                 df["timestamp"] = pd.to_datetime(df["timestamp"])
                 df = df.sort_values("timestamp").reset_index(drop=True)
 
+                # Resample 1h candles into true 4h candles if 4h timeframe requested
+                if timeframe == "4h" and len(df) > 0:
+                    df = (
+                        df.set_index("timestamp")
+                        .resample("4h", closed="left", label="left")
+                        .agg({
+                            "open": "first",
+                            "high": "max",
+                            "low": "min",
+                            "close": "last",
+                            "volume": "sum",
+                        })
+                        .dropna()
+                        .reset_index()
+                    )
+
                 # Cache locally
                 cache_file = self.cache_dir / f"{symbol.replace('/', '_')}_{timeframe}.parquet"
                 try:
                     df.to_parquet(cache_file, index=False)
-                except Exception:
+                except Exception as ex:
+                    logger.debug(f"Parquet cache save failed, falling back to CSV: {ex}")
                     df.to_csv(cache_file.with_suffix('.csv'), index=False)
 
                 return df, DataSourceType.HISTORICAL_REAL
 
         except Exception as e:
+            logger.warning(f"Failed to fetch market data via yfinance for {symbol}: {e}")
             # Network issue or rate-limit: check local cache first
             cached_df = self._load_from_cache(symbol, timeframe)
             if cached_df is not None and len(cached_df) > 30:
@@ -119,15 +140,15 @@ class MarketDataProvider:
         if cache_base.with_suffix('.parquet').exists():
             try:
                 return pd.read_parquet(cache_base.with_suffix('.parquet'))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to load parquet cache {cache_base}: {e}")
         if cache_base.with_suffix('.csv').exists():
             try:
                 df = pd.read_csv(cache_base.with_suffix('.csv'))
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 return df
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to load csv cache {cache_base}: {e}")
         return None
 
     def _generate_synthetic_forex_data(

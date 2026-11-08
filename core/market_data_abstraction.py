@@ -8,6 +8,7 @@ Enforces clear, immutable data source attribution (Real vs Synthetic vs Mock Alp
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone, timedelta
 from enum import Enum
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
@@ -16,6 +17,8 @@ import yfinance as yf
 
 from config import DATA_DIR, SUPPORTED_PAIRS, ForexPairConfig
 from core.asset_classes import AssetClass, get_asset_class, ALPACA_SUPPORTED_ASSETS
+
+logger = logging.getLogger("MarketDataAbstraction")
 
 
 class DataSourceType(str, Enum):
@@ -129,16 +132,34 @@ class ForexMarketDataProvider(BaseMarketDataProvider):
                 df["timestamp"] = pd.to_datetime(df["timestamp"])
                 df = df.sort_values("timestamp").reset_index(drop=True)
 
+                # Resample 1h candles into true 4h candles if 4h timeframe requested
+                if timeframe == "4h" and len(df) > 0:
+                    df = (
+                        df.set_index("timestamp")
+                        .resample("4h", closed="left", label="left")
+                        .agg({
+                            "open": "first",
+                            "high": "max",
+                            "low": "min",
+                            "close": "last",
+                            "volume": "sum",
+                        })
+                        .dropna()
+                        .reset_index()
+                    )
+
                 # Cache locally
                 cache_file = self.cache_dir / f"{symbol.replace('/', '_')}_{timeframe}.parquet"
                 try:
                     df.to_parquet(cache_file, index=False)
-                except Exception:
+                except Exception as ex:
+                    logger.debug(f"Parquet cache save failed, falling back to CSV: {ex}")
                     df.to_csv(cache_file.with_suffix('.csv'), index=False)
 
                 return df, DataSourceType.HISTORICAL_REAL, DATA_LABELS[DataSourceType.HISTORICAL_REAL]
 
-        except Exception:
+        except Exception as e:
+            logger.warning(f"Failed to fetch Forex data via yfinance for {symbol}: {e}")
             cached_df = self._load_from_cache(symbol, timeframe)
             if cached_df is not None and len(cached_df) > 30:
                 return cached_df, DataSourceType.HISTORICAL_REAL, DATA_LABELS[DataSourceType.HISTORICAL_REAL]
@@ -156,15 +177,15 @@ class ForexMarketDataProvider(BaseMarketDataProvider):
         if cache_base.with_suffix('.parquet').exists():
             try:
                 return pd.read_parquet(cache_base.with_suffix('.parquet'))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to load parquet cache {cache_base}: {e}")
         if cache_base.with_suffix('.csv').exists():
             try:
                 df = pd.read_csv(cache_base.with_suffix('.csv'))
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 return df
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Failed to load csv cache {cache_base}: {e}")
         return None
 
     def _generate_synthetic_forex_data(
@@ -297,9 +318,25 @@ class AlpacaMarketDataProvider(BaseMarketDataProvider):
                     df = df[req_cols].dropna()
                     df["timestamp"] = pd.to_datetime(df["timestamp"])
                     df = df.sort_values("timestamp").reset_index(drop=True)
+
+                    if timeframe == "4h" and len(df) > 0:
+                        df = (
+                            df.set_index("timestamp")
+                            .resample("4h", closed="left", label="left")
+                            .agg({
+                                "open": "first",
+                                "high": "max",
+                                "low": "min",
+                                "close": "last",
+                                "volume": "sum",
+                            })
+                            .dropna()
+                            .reset_index()
+                        )
+
                     return df, DataSourceType.DELAYED_LIVE, DATA_LABELS[DataSourceType.DELAYED_LIVE]
-            except Exception:
-                pass
+            except Exception as ex:
+                logger.debug(f"Failed to fetch live bars for {sym} via yfinance: {ex}")
 
         # Generate educational mock data
         df = self._generate_mock_equity_bars(sym, num_candles=150)

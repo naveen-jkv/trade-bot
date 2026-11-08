@@ -7,6 +7,7 @@ Resolves cross-model contradictions and formulates disciplined TradeProposals fo
 
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
+import logging
 from typing import Dict, List, Optional, Any, Tuple
 import pandas as pd
 
@@ -15,6 +16,8 @@ from agents.research_agent import TradingHypothesis
 from core.prediction import TradingPredictor
 from database.memory import TradingMemoryDB
 from config import DEFAULT_CONFIG, MLSettings
+
+logger = logging.getLogger("StrategyEvaluationAgent")
 
 
 @dataclass
@@ -84,8 +87,8 @@ class StrategyEvaluationAgent:
                 predicted_prob=max(ensemble_up, 1.0 - ensemble_up),
                 timestamp=ts,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to persist prediction to DB: {e}")
 
         # 3. Arbitrate Signals (Research vs ML vs Technical)
         research_dir = hypothesis.direction
@@ -162,7 +165,7 @@ class StrategyEvaluationAgent:
                 message=f"Proposal for {report.symbol}: {final_action} (Conf: {composite_conf:.2f}, RR: {rr:.2f}) - {rationale_items[0]}",
                 metadata={"action": final_action, "confidence": composite_conf, "prediction_id": pred_id},
             )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"Failed to persist strategy proposal log: {e}")
 
         return proposal
